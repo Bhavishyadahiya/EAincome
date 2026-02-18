@@ -106,8 +106,6 @@ start_containers() {
     NETWORK_TUN="--network=container:tun$UNIQUE_ID$i"
 
 
-
-    combined_ports=$mysterium_port$ebesucher_port$adnade_port
     echo -e "${GREEN}Starting Proxy container..${NOCOLOUR}"
     # Starting tun containers
     if [ "$container_pulled" = false ]; then
