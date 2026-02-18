@@ -2,44 +2,36 @@
 
 CONTAINER_FILE="containernames.txt"
 
-if [[ "$1" != "--restart" || -z "$2" ]]; then
-  echo "Usage:"
-  echo "  $0 --restart <container-name-prefix>"
-  echo
-  echo "Example:"
-  echo "  $0 --restart earnapp"
-  exit 1
-fi
-
-PREFIX="$2"
-
-# Safety checks
+# Check Docker
 if ! command -v docker &>/dev/null; then
   echo "Docker is not installed or not in PATH."
   exit 1
 fi
 
+# Check container file
 if [ ! -f "$CONTAINER_FILE" ]; then
   echo "Container names file '$CONTAINER_FILE' not found."
   exit 1
 fi
 
-MATCHED=false
+echo "Restarting EarnApp containers..."
 
-for container in $(grep -E "^${PREFIX}" "$CONTAINER_FILE"); do
+FOUND=false
+
+while read -r container; do
   if docker inspect "$container" >/dev/null 2>&1; then
-    echo "Restarting container: $container"
+    echo "Restarting: $container"
     docker restart "$container"
-    MATCHED=true
+    FOUND=true
   else
-    echo "Container not found (skipping): $container"
+    echo "Skipping (not found): $container"
   fi
-done
+done < "$CONTAINER_FILE"
 
-if [ "$MATCHED" = false ]; then
-  echo "No containers found with prefix: $PREFIX"
+if [ "$FOUND" = false ]; then
+  echo "No running EarnApp containers found."
   exit 1
 fi
 
-echo "Done."
+echo "All containers restarted."
 exit 0
