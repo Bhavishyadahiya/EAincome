@@ -343,6 +343,7 @@ fi
 # Delete containers and networks
 if [[ "$1" == "--delete" ]]; then
   echo -e "\n\nDeleting Containers and networks.."
+  SCRIPT_START_TIME=$(date +%s)
 
   # Delete containers by container names
   if [ -f "$container_names_file" ]; then
@@ -392,6 +393,15 @@ if [[ "$1" == "--delete" ]]; then
 
   # Delete folders for Docker-in-Docker
   sudo docker run --rm -v "$PWD:/output" docker:18.06.2-dind sh -c 'for folder in "$@"; do if [ -d "/output/$folder" ]; then rm -rf "/output/$folder"; fi; done' sh "${folders_to_be_removed[@]}"
+
+  SCRIPT_END_TIME=$(date +%s)
+  TOTAL_TIME=$((SCRIPT_END_TIME - SCRIPT_START_TIME))
+
+  echo -e "${GREEN}========================================${NOCOLOUR}"
+  echo -e "${GREEN}All containers and networks deleted.${NOCOLOUR}"
+  echo -e "${GREEN}Delete runtime: $(format_duration $TOTAL_TIME)${NOCOLOUR}"
+  echo -e "${GREEN}========================================${NOCOLOUR}"
+
 
   exit 1
 fi
