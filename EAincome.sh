@@ -43,34 +43,6 @@ if [ -f "$banner_file" ]; then
   echo -e "${NOCOLOUR}"
 fi
 
-# Check for open ports
-check_open_ports() {
-  local first_port=$1
-  local num_ports=$2
-  port_range=$(seq $first_port $((first_port+num_ports-1)))
-  open_ports=0
-
-  for port in $port_range; do
-    nc -z localhost $port > /dev/null 2>&1
-    if [ $? -eq 0 ]; then
-      open_ports=$((open_ports+1))
-    fi
-  done
-
-  while [ $open_ports -gt 0 ]; do
-    first_port=$((first_port+num_ports))
-    port_range=$(seq $first_port $((first_port+num_ports-1)))
-    open_ports=0
-    for port in $port_range; do
-      nc -z localhost $port > /dev/null 2>&1
-      if [ $? -eq 0 ]; then
-        open_ports=$((open_ports+1))
-      fi
-    done
-  done
-
-  echo $first_port
-}
 
 # Start all containers
 start_containers() {
