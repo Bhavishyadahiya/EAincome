@@ -1,20 +1,5 @@
 #!/bin/bash
 
-##################################################################################
-# Author: engageub                                                               #
-# Description: This script lets you earn passive income by sharing your internet #
-# connection. It also supports multiple proxies with multiple accounts.          #
-# Script Name: Internet Income (Supports Proxies)                                #
-# Script Link: https://github.com/engageub/InternetIncome                        #
-# DISCLAIMER: This script is provided "as is" and without warranty of any kind.  #
-# The author makes no warranties, express or implied, that this script is free of#
-# errors, defects, or suitable for any particular purpose. The author shall not  #
-# be liable for any damages suffered by any user of this script, whether direct, #
-# indirect, incidental, consequential, or special, arising from the use of or    #
-# inability to use this script or its documentation, even if the author has been #
-# advised of the possibility of such damages.                                    #
-##################################################################################
-
 ######### DO NOT EDIT THE CODE BELOW UNLESS YOU KNOW WHAT YOU ARE DOING  #########
 # Colours
 RED="\033[0;31m"
