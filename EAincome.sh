@@ -41,10 +41,6 @@ back_up_files=($earnapp_file)
 container_pulled=false
 docker_in_docker_detected=false
 
-# Mysterium and ebesucher first port
-mysterium_first_port=2000
-ebesucher_first_port=3000
-adnade_first_port=4000
 
 #Unique Id
 UNIQUE_ID=`cat /dev/urandom | LC_ALL=C tr -dc 'a-f0-9' | dd bs=1 count=32 2>/dev/null`
@@ -124,39 +120,7 @@ start_containers() {
   if [[ $i && $proxy ]]; then
     NETWORK_TUN="--network=container:tun$UNIQUE_ID$i"
 
-    if [ "$MYSTERIUM" = true ]; then
-      mysterium_first_port=$(check_open_ports $mysterium_first_port 1)
-      if ! expr "$mysterium_first_port" : '[[:digit:]]*$' >/dev/null; then
-         echo -e "${RED}Problem assigning port $mysterium_first_port ..${NOCOLOUR}"
-         echo -e "${RED}Failed to start Mysterium node. Resolve or disable Mysterium to continue. Exiting..${NOCOLOUR}"
-         exit 1
-      fi
-      mysterium_port="-p $mysterium_first_port:4449 "
-    fi
 
-    if [[ $EBESUCHER_USERNAME ]]; then
-      ebesucher_first_port=$(check_open_ports $ebesucher_first_port 1)
-      if ! expr "$ebesucher_first_port" : '[[:digit:]]*$' >/dev/null; then
-         echo -e "${RED}Problem assigning port $ebesucher_first_port ..${NOCOLOUR}"
-         echo -e "${RED}Failed to start Ebesucher. Resolve or disable Ebesucher to continue. Exiting..${NOCOLOUR}"
-         exit 1
-      fi
-      if [ "$EBESUCHER_USE_CHROME" = true ]; then
-          ebesucher_port="-p $ebesucher_first_port:3000 "
-      else
-          ebesucher_port="-p $ebesucher_first_port:5800 "
-      fi
-    fi
-
-    if [[ $ADNADE_USERNAME ]]; then
-      adnade_first_port=$(check_open_ports $adnade_first_port 1)
-      if ! expr "$adnade_first_port" : '[[:digit:]]*$' >/dev/null; then
-         echo -e "${RED}Problem assigning port $adnade_first_port ..${NOCOLOUR}"
-         echo -e "${RED}Failed to start Adnade. Resolve or disable Adnade to continue. Exiting..${NOCOLOUR}"
-         exit 1
-      fi
-      adnade_port="-p $adnade_first_port:5900 "
-    fi
 
     combined_ports=$mysterium_port$ebesucher_port$adnade_port
     echo -e "${GREEN}Starting Proxy container..${NOCOLOUR}"
