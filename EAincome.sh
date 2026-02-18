@@ -43,6 +43,17 @@ if [ -f "$banner_file" ]; then
   echo -e "${NOCOLOUR}"
 fi
 
+format_duration() {
+  local seconds=$1
+  local mins=$((seconds / 60))
+  local secs=$((seconds % 60))
+
+  if (( mins > 0 )); then
+    echo "${mins} min ${secs} sec"
+  else
+    echo "${secs} sec"
+  fi
+}
 
 # Start all containers
 start_containers() {
@@ -236,6 +247,7 @@ fi
 
 if [[ "$1" == "--start" ]]; then
   echo -e "\n\nStarting.."
+  SCRIPT_START_TIME=$(date +%s)
 
   # Check if the required files are present
   for required_file in "${required_files[@]}"; do
@@ -316,6 +328,15 @@ if [[ "$1" == "--start" ]]; then
     echo -e "${RED}USE_PROXIES is disabled, using direct internet connection..${NOCOLOUR}"
     start_containers
   fi
+
+  SCRIPT_END_TIME=$(date +%s)
+  TOTAL_TIME=$((SCRIPT_END_TIME - SCRIPT_START_TIME))
+
+  echo -e "${GREEN}========================================${NOCOLOUR}"
+  echo -e "${GREEN}All containers processed.${NOCOLOUR}"
+  echo -e "${GREEN}Total runtime: $(format_duration $TOTAL_TIME)${NOCOLOUR}"
+  echo -e "${GREEN}========================================${NOCOLOUR}"
+  
   exit 1
 fi
 
