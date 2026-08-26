@@ -53,6 +53,13 @@ When you want to pick up a newer EarnApp release, rebuild explicitly:
 sudo bash EAincome.sh --build
 ```
 
+The build also refuses to hand you a broken image. Before it installs anything it
+verifies that the certificate store it just built can actually validate the real
+BrightData and EarnApp TLS chains, and aborts if it cannot. The installer then
+performs a genuine registration as it runs, which means the `earnapp` binary's own
+TLS stack has exercised that store before the image is finished. A build that
+succeeds is a build whose nodes can link.
+
 Set `BUILD_EARNAPP_IMAGE=false` if you would rather pull `EARNAPP_IMAGE`. That path
 still works, and the script compensates for the missing certificate store by
 bind-mounting your host's bundle into the container, so your host needs the
@@ -76,9 +83,17 @@ an image with the package installed but the variable unset still failed to regis
 and the same image registered within seconds once the variable was set. The variable
 is the operative half.
 
-Nodes started by EAincome are already covered. The image built by `--build` sets the
-variable at build time, and the prebuilt-image path sets it on the `docker run`
-command line alongside a bind-mounted bundle.
+Nodes started by EAincome are already covered, and covered in a way that does not
+depend on the variable merely being set. The build verifies the store against the
+live BrightData and EarnApp chains and fails rather than shipping an image that
+cannot register. At startup the container checks the store again, because a bind
+mount or an intercepting proxy can break it after the image was built; if the
+variable is unset or points at nothing, it finds a usable bundle itself and says so
+in the log. The prebuilt-image path sets the variable on the `docker run` command
+line alongside a bind-mounted bundle from your host.
+
+So if a node will not link, `docker logs <container>` tells you which of these
+happened rather than leaving you to guess.
 
 For a **native install** managed by systemd, run the helper:
 

@@ -66,19 +66,65 @@ if [[ -f "$CONFIG_DIR/ver" ]]; then
   log "EarnApp version: $(cat "$CONFIG_DIR/ver")"
 fi
 
-# 3. Trust store sanity check. This is the failure that stops nodes linking.
-if [[ -z "${NODE_EXTRA_CA_CERTS:-}" ]]; then
-  warn "NODE_EXTRA_CA_CERTS is not set."
-  warn "The earnapp binary is a bundled Node application and will fall back to"
-  warn "Node's compiled-in root certificates, which may be too old to validate"
-  warn "BrightData's chain. If registration fails with 'check internet"
-  warn "connection and try again', that is why."
-elif [[ ! -s "$NODE_EXTRA_CA_CERTS" ]]; then
-  warn "NODE_EXTRA_CA_CERTS points at '$NODE_EXTRA_CA_CERTS', which is missing or empty."
-  warn "Registration will almost certainly fail. If you bind-mounted a trust"
-  warn "store from the host, check that the source path exists."
+# 3. Trust store. This is the failure that stops nodes linking, so repair it here
+#    rather than only complaining about it. A bind mount over /etc/ssl, or someone
+#    pointing the variable at a path that does not exist, can leave a correctly
+#    built image with no usable store at runtime.
+ca_candidates=(
+  /etc/ssl/certs/ca-certificates.crt
+  /etc/pki/tls/certs/ca-bundle.crt
+  /etc/ssl/ca-bundle.pem
+  /etc/ssl/cert.pem
+)
+
+if [[ -z "${NODE_EXTRA_CA_CERTS:-}" || ! -s "${NODE_EXTRA_CA_CERTS:-}" ]]; then
+  if [[ -n "${NODE_EXTRA_CA_CERTS:-}" ]]; then
+    warn "NODE_EXTRA_CA_CERTS points at '$NODE_EXTRA_CA_CERTS', which is missing or empty."
+  else
+    warn "NODE_EXTRA_CA_CERTS is not set."
+  fi
+  warn "Searching for a usable certificate bundle rather than failing to register."
+  for candidate in "${ca_candidates[@]}"; do
+    if [[ -s "$candidate" ]]; then
+      export NODE_EXTRA_CA_CERTS="$candidate"
+      log "Recovered the trust store: using $candidate."
+      break
+    fi
+  done
+fi
+
+if [[ -z "${NODE_EXTRA_CA_CERTS:-}" || ! -s "$NODE_EXTRA_CA_CERTS" ]]; then
+  err "No usable certificate bundle exists in this container."
+  err "The earnapp binary bundles its own TLS stack and will fall back to Node's"
+  err "compiled-in roots, so registration will most likely fail with 'check"
+  err "internet connection and try again'. Rebuild the image, or bind-mount a"
+  err "bundle from the host onto /etc/ssl/certs/ca-certificates.crt."
 else
   log "TLS trust store: $NODE_EXTRA_CA_CERTS ($(grep -c 'BEGIN CERTIFICATE' "$NODE_EXTRA_CA_CERTS" 2>/dev/null || echo '?') certificates)"
+
+  # A store that loads is not the same as a store that works. Verify a real
+  # handshake against the registration endpoint. Retried, because a proxy sidecar
+  # sharing this network namespace may still be bringing its tunnel up.
+  if command -v openssl >/dev/null 2>&1; then
+    tls_ok=false
+    for _ in 1 2 3; do
+      if openssl s_client -connect earnapp.com:443 -servername earnapp.com \
+           -CAfile "$NODE_EXTRA_CA_CERTS" -verify_return_error -brief \
+           </dev/null >/dev/null 2>&1; then
+        tls_ok=true
+        break
+      fi
+      sleep 5
+    done
+    if [[ "$tls_ok" == true ]]; then
+      log "TLS check passed: earnapp.com validates against this trust store."
+    else
+      warn "TLS check FAILED: earnapp.com could not be verified with this store."
+      warn "Registration will probably report 'check internet connection and try"
+      warn "again'. Either the network is not up yet, something is intercepting"
+      warn "TLS, or the bundle is incomplete. Starting anyway in case it recovers."
+    fi
+  fi
 fi
 
 # Forward termination to the child so 'docker stop' is not a 10 second wait.

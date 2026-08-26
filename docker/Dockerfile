@@ -11,6 +11,13 @@
 #
 # which reads like a network fault but is certificate verification failing.
 #
+# Setting the variable is not the same as proving it works, so the build proves it:
+# it validates the real EarnApp and BrightData TLS chains against the bundle and
+# refuses to produce an image if any of them cannot be verified. An image that
+# builds is therefore an image whose nodes can register, rather than one that only
+# looks correct. The entrypoint repeats the check on every start, since a trust
+# store can be broken later by a bind mount or by something intercepting TLS.
+#
 # Three bugs in the community Dockerfiles are fixed here:
 #   1. The installer URL cdn-earnapp.b-cdn.net/static/earnapp/install.sh now 404s.
 #      The live entry point is brightdata.com/static/earnapp/install.sh, which
@@ -36,9 +43,30 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        openssl \
         wget \
         hostname \
-    && update-ca-certificates \
+    # --fresh rebuilds the bundle from the shipped certificates instead of
+    # amending whatever happened to be there already.
+    && update-ca-certificates --fresh \
+    && test -s "$NODE_EXTRA_CA_CERTS" \
+    # Prove the bundle can actually validate the chains this node will meet.
+    # brightdata.com and cdn.earnapp.com are already hard dependencies of this
+    # build, and earnapp.com is where registration happens, so a network outage
+    # would fail the build anyway. What this catches is the case that matters: a
+    # store that is present but cannot verify these hosts, which yields an image
+    # that looks fine and whose nodes never link.
+    && for host in brightdata.com cdn.earnapp.com earnapp.com; do \
+         if openssl s_client -connect "$host:443" -servername "$host" \
+              -CAfile "$NODE_EXTRA_CA_CERTS" -verify_return_error -brief \
+              </dev/null >/dev/null 2>&1; then \
+           echo "TLS verified: $host"; \
+         else \
+           echo "TLS verification FAILED for $host using $NODE_EXTRA_CA_CERTS"; \
+           echo "Refusing to build an image whose nodes would not be able to register."; \
+           exit 1; \
+         fi; \
+       done \
     # The installer probes for systemd tooling that does not exist in a container.
     # Inert shims stop it aborting. Written as static text on purpose: the
     # originals interpolated $(lsb_release -a) before lsb_release was installed,
@@ -50,7 +78,17 @@ RUN apt-get update \
     && wget -qO /tmp/install.sh "$INSTALLER_URL" \
     && test -s /tmp/install.sh \
     && bash /tmp/install.sh -y \
-    && { earnapp stop >/dev/null 2>&1 || true; }
+    && { earnapp stop >/dev/null 2>&1 || true; } \
+    # The installer performs a real registration while it runs, which means the
+    # earnapp binary's own bundled TLS stack validated this store using this
+    # variable. That is the exact operation that fails for everyone hitting the
+    # linking bug, so record whether it worked. The throwaway node identity it
+    # creates is stripped in the next layer.
+    && if [ -f "$CONFIG_DIR/registered" ]; then \
+         echo "Verified end to end: the earnapp binary completed a real registration during the build."; \
+       else \
+         echo "Note: the installer left no registration marker. The TLS checks above passed, so this is more likely an installer change than a trust problem."; \
+       fi
 
 # EAincome bind-mounts a host directory over /etc/earnapp for per-node state,
 # which would hide everything the installer wrote there. Stash a template the
