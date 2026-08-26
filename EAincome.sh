@@ -47,6 +47,15 @@ docker_in_docker_detected=false
 # Image used for Docker-in-Docker filesystem checks
 docker_cli_image="docker:cli"
 
+# Local image build context
+docker_folder="docker"
+dockerfile_path="$docker_folder/Dockerfile"
+docker_entrypoint_path="$docker_folder/entrypoint.sh"
+
+# Set by resolve_earnapp_image
+earnapp_image_is_local=false
+earnapp_ca_params=""
+
 #Unique Id
 UNIQUE_ID=`cat /dev/urandom | LC_ALL=C tr -dc 'a-f0-9' | dd bs=1 count=32 2>/dev/null`
 
@@ -73,6 +82,37 @@ format_duration() {
   else
     echo "${secs} sec"
   fi
+}
+
+# Read properties.conf and export every key as a shell variable.
+# Factored out of --start so that --build can read the same configuration.
+load_properties() {
+  if [ ! -f "$properties_file" ]; then
+    echo -e "${RED}Required file $properties_file does not exist, exiting..${NOCOLOUR}"
+    exit 1
+  fi
+
+  # Remove special characters ^M from properties file
+  sed -i 's/\r//g' "$properties_file"
+
+  while IFS= read -r line; do
+    # Ignore lines that start with #
+    if [[ $line != '#'* ]]; then
+        # Split the line at the first occurrence of =
+        key="${line%%=*}"
+        value="${line#*=}"
+        # Trim leading and trailing whitespace from key and value
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        # Ignore lines without a value after =
+        if [[ -n $value ]]; then
+            # Replace variables with their values
+            value=$(eval "echo $value")
+            # Export the key-value pairs as variables
+            export "$key"="$value"
+        fi
+    fi
+  done < "$properties_file"
 }
 
 # Check if a container with the given name already exists.
@@ -221,6 +261,90 @@ resolve_dns_mode() {
   fi
 }
 
+# Build EAincome's own EarnApp image from the docker folder.
+#
+# Building locally rather than pulling means every node on this host runs an
+# identical, known-good binary with a trust store that is as fresh as the day you
+# built it, instead of whatever a remote tag happens to point at today. The image
+# is built once and then reused for every node UUID.
+build_earnapp_image() {
+  local tag="$1"
+
+  if [ ! -f "$dockerfile_path" ] || [ ! -f "$docker_entrypoint_path" ]; then
+    echo -e "${RED}Cannot build the EarnApp image because $dockerfile_path or${NOCOLOUR}"
+    echo -e "${RED}$docker_entrypoint_path is missing.${NOCOLOUR}"
+    echo -e "${RED}Restore the $docker_folder folder, or set BUILD_EARNAPP_IMAGE=false in${NOCOLOUR}"
+    echo -e "${RED}$properties_file to use a prebuilt image instead. Exiting..${NOCOLOUR}"
+    exit 1
+  fi
+
+  echo -e "${YELLOW}Building EarnApp image $tag.${NOCOLOUR}"
+  echo -e "${YELLOW}This takes a few minutes the first time and is then cached.${NOCOLOUR}"
+
+  # buildx is not installed everywhere. Fall back to the classic builder rather
+  # than failing with "BuildKit is enabled but the buildx component is missing".
+  local build_env=""
+  if ! sudo docker buildx version >/dev/null 2>&1; then
+    build_env="DOCKER_BUILDKIT=0"
+  fi
+
+  if sudo env $build_env docker build --pull -t "$tag" "$docker_folder"; then
+    echo -e "${GREEN}Built $tag successfully.${NOCOLOUR}"
+  else
+    echo -e "${RED}Failed to build $tag. Exiting..${NOCOLOUR}"
+    exit 1
+  fi
+}
+
+# Decide which EarnApp image to run, and how to give it a usable TLS trust store.
+#
+# The earnapp binary is a bundled Node application. It ignores the operating
+# system trust store unless NODE_EXTRA_CA_CERTS points at a bundle. Without it,
+# registration fails with "check internet connection and try again" on hosts whose
+# internet is perfectly fine, because what actually failed was certificate
+# verification. EAincome's own image bakes the variable in. A prebuilt third party
+# image almost certainly does not, so the host's trust store is bind-mounted in
+# and the variable is set on the command line instead.
+resolve_earnapp_image() {
+  if [ "$BUILD_EARNAPP_IMAGE" = true ]; then
+    EARNAPP_IMAGE="$EARNAPP_LOCAL_TAG"
+    earnapp_image_is_local=true
+
+    if sudo docker image inspect "$EARNAPP_IMAGE" >/dev/null 2>&1; then
+      echo -e "${GREEN}Reusing the EarnApp image already built on this host: $EARNAPP_IMAGE${NOCOLOUR}"
+      echo -e "${GREEN}To rebuild it, run:${NOCOLOUR} sudo bash $script_name --build"
+    else
+      build_earnapp_image "$EARNAPP_IMAGE"
+    fi
+    return
+  fi
+
+  echo -e "${YELLOW}BUILD_EARNAPP_IMAGE is false, using prebuilt image $EARNAPP_IMAGE${NOCOLOUR}"
+
+  local bundle=""
+  local candidate
+  for candidate in /etc/ssl/certs/ca-certificates.crt \
+                   /etc/pki/tls/certs/ca-bundle.crt \
+                   /etc/ssl/ca-bundle.pem \
+                   /etc/ssl/cert.pem; do
+    if [ -s "$candidate" ]; then
+      bundle=$(readlink -f "$candidate")
+      break
+    fi
+  done
+
+  if [[ -n "$bundle" ]]; then
+    earnapp_ca_params="--mount type=bind,source=$bundle,target=/etc/ssl/certs/ca-certificates.crt,readonly -e NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt"
+    echo -e "${GREEN}Sharing this host's TLS trust store with the container: $bundle${NOCOLOUR}"
+  else
+    echo -e "${YELLOW}No CA bundle was found on this host, so nodes may fail to register${NOCOLOUR}"
+    echo -e "${YELLOW}with 'check internet connection and try again'. That message means a${NOCOLOUR}"
+    echo -e "${YELLOW}certificate failure, not a network one. Install the ca-certificates${NOCOLOUR}"
+    echo -e "${YELLOW}package, or leave BUILD_EARNAPP_IMAGE=true so that EAincome builds an${NOCOLOUR}"
+    echo -e "${YELLOW}image with a trust store of its own.${NOCOLOUR}"
+  fi
+}
+
 # Start all containers
 start_containers() {
 
@@ -290,7 +414,8 @@ start_containers() {
       fi
     done
     date_time=`date "+%D %T"`
-    if [ "$container_pulled" = false ]; then
+    # A locally built image has no registry to pull from.
+    if [[ "$container_pulled" == false && "$earnapp_image_is_local" != true ]]; then
       sudo docker pull "$EARNAPP_IMAGE"
     fi
     mkdir -p $PWD/$earnapp_data_folder/data$i
@@ -310,7 +435,7 @@ start_containers() {
     fi
 
     check_container_exists earnapp$UNIQUE_ID$i
-    if CONTAINER_ID=$(sudo docker run -d --health-interval=24h --name earnapp$UNIQUE_ID$i $LOGS_PARAM $DNS_VOLUME --restart=always $NETWORK_TUN --mount type=bind,source=$PWD/$earnapp_data_folder/data$i,target=/etc/earnapp -e EARNAPP_UUID=$uuid "$EARNAPP_IMAGE"); then
+    if CONTAINER_ID=$(sudo docker run -d --health-interval=24h --name earnapp$UNIQUE_ID$i $LOGS_PARAM $DNS_VOLUME --restart=always $NETWORK_TUN --mount type=bind,source=$PWD/$earnapp_data_folder/data$i,target=/etc/earnapp $earnapp_ca_params -e EARNAPP_UUID=$uuid "$EARNAPP_IMAGE"); then
       echo -e "${GREEN}Container earnapp$UNIQUE_ID$i started successfully.${NOCOLOUR}"
     else
       echo -e "${RED}Failed to start container for Earnapp. Exiting..${NOCOLOUR}"
@@ -384,34 +509,14 @@ if [[ "$1" == "--start" ]]; then
     fi
   done
 
-  # Remove special characters ^M from properties file
-  sed -i 's/\r//g' $properties_file
+  # Read the properties file and export variables to the current shell
+  load_properties
 
   # CPU architecture to get docker images
   CPU_ARCH=`uname -m`
 
   # Write current PID to file
   echo "$$" > $process_id_file
-
-  # Read the properties file and export variables to the current shell
-  while IFS= read -r line; do
-    # Ignore lines that start with #
-    if [[ $line != '#'* ]]; then
-        # Split the line at the first occurrence of =
-        key="${line%%=*}"
-        value="${line#*=}"
-        # Trim leading and trailing whitespace from key and value
-        key="${key%"${key##*[![:space:]]}"}"
-        value="${value%"${value##*[![:space:]]}"}"
-        # Ignore lines without a value after =
-        if [[ -n $value ]]; then
-            # Replace variables with their values
-            value=$(eval "echo $value")
-            # Export the key-value pairs as variables
-            export "$key"="$value"
-        fi
-    fi
-  done < $properties_file
 
   # Setting Device name
   if [[ ! $DEVICE_NAME ]]; then
@@ -428,7 +533,22 @@ if [[ "$1" == "--start" ]]; then
     EARNAPP_IMAGE='madereddy/earnapp:latest'
   fi
 
+  # Tag used for the image EAincome builds itself
+  if [[ ! $EARNAPP_LOCAL_TAG ]]; then
+    EARNAPP_LOCAL_TAG='eaincome/earnapp:local'
+  fi
+
+  # Build locally by default. Set BUILD_EARNAPP_IMAGE=false in properties.conf to
+  # pull EARNAPP_IMAGE from a registry instead.
+  if [[ -z "$BUILD_EARNAPP_IMAGE" ]]; then
+    BUILD_EARNAPP_IMAGE=true
+  fi
+
   resolve_dns_mode
+
+  if [ "$EARNAPP" = true ]; then
+    resolve_earnapp_image
+  fi
 
   if [ "$USE_PROXIES" = true ]; then
     echo -e "${GREEN}USE_PROXIES is enabled, using proxies..${NOCOLOUR}"
@@ -466,6 +586,31 @@ if [[ "$1" == "--start" ]]; then
   echo -e "${GREEN}========================================${NOCOLOUR}"
   echo -e "${GREEN}All containers processed.${NOCOLOUR}"
   echo -e "${GREEN}Total runtime: $(format_duration $TOTAL_TIME)${NOCOLOUR}"
+  echo -e "${GREEN}========================================${NOCOLOUR}"
+
+  exit 0
+fi
+
+# Build the EarnApp image without starting any nodes
+if [[ "$1" == "--build" ]]; then
+  echo -e "\n\nBuilding the EarnApp image.."
+  SCRIPT_START_TIME=$(date +%s)
+
+  load_properties
+
+  if [[ ! $EARNAPP_LOCAL_TAG ]]; then
+    EARNAPP_LOCAL_TAG='eaincome/earnapp:local'
+  fi
+
+  build_earnapp_image "$EARNAPP_LOCAL_TAG"
+
+  SCRIPT_END_TIME=$(date +%s)
+  TOTAL_TIME=$((SCRIPT_END_TIME - SCRIPT_START_TIME))
+
+  echo -e "${GREEN}========================================${NOCOLOUR}"
+  echo -e "${GREEN}$EARNAPP_LOCAL_TAG is ready.${NOCOLOUR}"
+  echo -e "${GREEN}Every node started with BUILD_EARNAPP_IMAGE=true will reuse it.${NOCOLOUR}"
+  echo -e "${GREEN}Build runtime: $(format_duration $TOTAL_TIME)${NOCOLOUR}"
   echo -e "${GREEN}========================================${NOCOLOUR}"
 
   exit 0
@@ -646,4 +791,4 @@ if [[ "$1" == "--deleteBackup" ]]; then
   exit 0
 fi
 
-echo -e "Valid options are: ${RED}--start${NOCOLOUR}, ${RED}--delete${NOCOLOUR}, ${RED}--deleteBackup${NOCOLOUR}, ${RED}--install${NOCOLOUR}"
+echo -e "Valid options are: ${RED}--start${NOCOLOUR}, ${RED}--delete${NOCOLOUR}, ${RED}--deleteBackup${NOCOLOUR}, ${RED}--build${NOCOLOUR}, ${RED}--install${NOCOLOUR}"
