@@ -76,7 +76,11 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < $proxies_file
 
 if [ ! -f $tun_containers_file ]; then
-  echo "$tun_containers_file file does not exist. Exiting.."
+  echo "No xjasonlyu/tun2socks containers were found, so there is nothing to update."
+  echo "EAincome now routes all proxies through tun2proxy, whose proxy address"
+  echo "cannot be hot-swapped by this script. To change proxies, edit $proxies_file"
+  echo "then run: sudo bash EAincome.sh --delete && sudo bash EAincome.sh --start"
+  echo "Note: your EarnApp node UUIDs in earnapp.txt are preserved across a restart."
   exit 1
 fi
 

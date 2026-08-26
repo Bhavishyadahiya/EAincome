@@ -1,0 +1,20 @@
+# Runtime state written by EAincome.sh -- never commit these.
+# earnapp.txt holds your node UUIDs, which are effectively account secrets.
+earnapp.txt
+containernames.txt
+networks.txt
+process.pid
+resolv.conf
+
+# updateProxies.sh scratch files
+tuncontainers.txt
+updatedproxies.txt
+
+# Per-node EarnApp data
+earnappdata/
+
+# Your actual proxy list. Keep the commented template in git, not your proxies.
+# Remove this line if you want to version your proxy list in a private repo.
+proxies.txt
+
+*.log
