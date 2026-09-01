@@ -177,14 +177,71 @@ link. See the troubleshooting section above.
 
 `restart.sh` restarts every container listed in `containernames.txt`.
 
-`earnappStatus.sh` asks the EarnApp dashboard what it thinks of your nodes and
-prints one row per node, mapping each node ID back to the container running it.
-This is the only reliable way to tell a node that has stopped earning from one
-that is fine: the `earnapp` binary writes nothing to stdout once it is running,
-even with `--verbose`, and its own SDK log is encrypted, so a red node looks
-identical from inside the container to a green one.
+`nodeWatchdog.sh` finds nodes that have stopped doing any work and restarts them.
+It needs no credentials, no configuration and asks you nothing -- everything it
+uses comes from Docker and from `/proc`:
 
-It needs your dashboard session cookie. Sign in at
+```bash
+bash nodeWatchdog.sh                # report only, changes nothing (the default)
+bash nodeWatchdog.sh --once         # act once, then exit
+bash nodeWatchdog.sh --once -n      # say what it would do, do nothing
+bash nodeWatchdog.sh --watch        # sample and act every INTERVAL seconds
+bash nodeWatchdog.sh --cron         # print a crontab line to paste
+```
+
+Because the `earnapp` binary is silent once running, the watchdog judges a node
+by what it does on the network rather than by what it says. It samples two things
+per node from inside the container's network namespace: total bytes through every
+interface except `lo`, and the number of established TCP connections to port 443.
+A healthy node moves tens of megabytes an hour in each direction and holds
+several connections at once; an idle one sits at a few bytes a second of
+keepalive. A node is only called stalled when **both** signals agree, because
+either one alone has a benign explanation -- a quiet period, or a momentary
+reconnect.
+
+It also fixes what happens after a host reboot. In proxy mode each node container
+shares its `tun2proxy` container's network namespace, and at boot Docker starts
+containers in arbitrary order, so a node that Docker tries to start before its
+tunnel is up fails with `cannot join network namespace of a non running
+container`. That is a *start* failure rather than a run failure, so `--restart
+always` never rescues it and the node stays dead until something starts it by
+hand. The watchdog starts the parent first and the node second, which is exactly
+the ordering Docker's restart policy cannot provide.
+
+Every threshold is an environment variable, so nothing in the script needs
+editing:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `GRACE` | `900` | Ignore a node for this many seconds after it starts |
+| `STALL_WINDOW` | `1800` | How far back to look when measuring traffic |
+| `STALL_BYTES` | `1048576` | Less than this over the window counts as no traffic |
+| `MIN_SOCKETS` | `2` | Fewer established `:443` connections than this counts as disconnected |
+| `COOLDOWN` | `1800` | Minimum seconds between restarts of the same node |
+| `CAP` / `CAP_WINDOW` | `3` / `21600` | Give up on a node after this many restarts in this window |
+| `INTERVAL` | `60` | Seconds between samples in `--watch` |
+
+Two honest caveats. The thresholds are derived from measurements of healthy nodes
+rather than from a node caught in the act of not earning, which is why the
+default mode changes nothing and why every run appends its samples to
+`watchdog.state`: once you see a node go red in the dashboard you can look back
+at what its numbers were doing and tighten the thresholds to match. And the
+`CAP` exists because a restart is not a cure for everything -- a node that needs
+restarting three times in six hours has a problem a restart will not fix, and the
+watchdog says so in `watchdog.log` and then leaves it alone.
+
+Run it as root or as a user in the `docker` group. Nodes are found by the
+`EARNAPP_UUID` environment variable rather than by container name, so a `tun*`
+container can never be picked as a candidate -- restarting one would tear the
+network namespace out from under the node sharing it.
+
+`earnappStatus.sh` is the optional counterpart: it asks the EarnApp dashboard
+what it thinks of your nodes and prints one row per node, mapping each node ID
+back to the container running it. It is the only way to see the dashboard's own
+verdict from the command line, but unlike the watchdog it needs a session cookie,
+so it is a diagnostic tool rather than something to automate.
+
+To use it, sign in at
 <https://earnapp.com/dashboard>, open developer tools, find the
 `oauth-refresh-token` cookie for `earnapp.com`, and save it:
 
