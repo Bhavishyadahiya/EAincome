@@ -160,6 +160,15 @@ near the node.
 | `USE_DNS_OVER_HTTPS` | `false` | Selects `over-tcp` when the mode above is blank |
 | `USE_SOCKS5_DNS` | `false` | **Deprecated.** Use `TUN2PROXY_DNS_MODE='direct'` |
 | `ENABLE_LOGS` | `false` | Debugging only. Costs performance |
+| `LOG_MAX_SIZE` | `10m` | Log size per container before rotation, used only when `ENABLE_LOGS=true` |
+| `LOG_MAX_FILES` | `3` | Rotated files kept per container. Worst case on disk is size x files x containers |
+| `TUN2PROXY_LOG_LEVEL` | `info` | tun2proxy verbosity. Upstream uses `trace`, which logs every relayed connection on every node |
+
+Upstream sets `max-size=100k` and leaves `max-file` at 1, which holds only two
+or three minutes of a busy node's output -- by the time you go looking, the thing
+you wanted to see has been truncated away. The defaults above hold roughly a day
+per container. The log driver is fixed when a container is created, so changing
+any of these needs `--delete` followed by `--start`.
 
 ## Helper scripts
 
@@ -167,6 +176,33 @@ near the node.
 link. See the troubleshooting section above.
 
 `restart.sh` restarts every container listed in `containernames.txt`.
+
+`earnappStatus.sh` asks the EarnApp dashboard what it thinks of your nodes and
+prints one row per node, mapping each node ID back to the container running it.
+This is the only reliable way to tell a node that has stopped earning from one
+that is fine: the `earnapp` binary writes nothing to stdout once it is running,
+even with `--verbose`, and its own SDK log is encrypted, so a red node looks
+identical from inside the container to a green one.
+
+It needs your dashboard session cookie. Sign in at
+<https://earnapp.com/dashboard>, open developer tools, find the
+`oauth-refresh-token` cookie for `earnapp.com`, and save it:
+
+```bash
+umask 077; printf '%s' 'PASTE_THE_COOKIE_VALUE' > ~/.earnapp_token
+bash earnappStatus.sh
+```
+
+That cookie is equivalent to being signed in to your account. It is gitignored,
+the script only ever reads it from a file, and it is passed to curl through a
+private config file so it never appears in `ps` output. Never paste it into a
+chat or a terminal argument.
+
+The script only reads; it restarts nothing. It exits 0 when every node is
+earning and 1 when at least one is not, so it also works as a cron check. Use
+`--shape` if the output ever stops making sense -- the dashboard API is
+undocumented and has changed before, and `--shape` prints the structure with all
+values redacted, which is safe to share.
 
 `updateProxies.sh` is a leftover that hot-swapped the proxy address inside
 `xjasonlyu/tun2socks` containers. tun2proxy takes its proxy as a command-line

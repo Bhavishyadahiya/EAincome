@@ -371,8 +371,15 @@ start_containers() {
     LOGS_PARAM="--log-driver none"
     TUN_LOG_PARAM="off"
   else
-    LOGS_PARAM="--log-driver=json-file --log-opt max-size=100k"
-    TUN_LOG_PARAM="trace"
+    # Upstream uses max-size=100k, and because max-file defaults to 1 that holds
+    # only a couple of minutes of a busy node's output -- so by the time you go
+    # looking, whatever you wanted to see has already been truncated away.
+    # 10m x 3 keeps roughly a day per container and is still bounded.
+    LOGS_PARAM="--log-driver=json-file --log-opt max-size=${LOG_MAX_SIZE:-10m} --log-opt max-file=${LOG_MAX_FILES:-3}"
+    # Upstream uses trace here. tun2proxy at trace logs every connection it
+    # relays, which costs CPU on every node and buries the EarnApp side of the
+    # picture; info still shows tunnel setup and failures.
+    TUN_LOG_PARAM="${TUN2PROXY_LOG_LEVEL:-info}"
   fi
 
   # Starting tun2proxy container
