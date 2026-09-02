@@ -102,28 +102,53 @@ if [[ -z "${NODE_EXTRA_CA_CERTS:-}" || ! -s "$NODE_EXTRA_CA_CERTS" ]]; then
 else
   log "TLS trust store: $NODE_EXTRA_CA_CERTS ($(grep -c 'BEGIN CERTIFICATE' "$NODE_EXTRA_CA_CERTS" 2>/dev/null || echo '?') certificates)"
 
-  # A store that loads is not the same as a store that works. Verify a real
-  # handshake against the registration endpoint. Retried, because a proxy sidecar
-  # sharing this network namespace may still be bringing its tunnel up.
-  if command -v openssl >/dev/null 2>&1; then
-    tls_ok=false
-    for _ in 1 2 3; do
-      if openssl s_client -connect earnapp.com:443 -servername earnapp.com \
-           -CAfile "$NODE_EXTRA_CA_CERTS" -verify_return_error -brief \
-           </dev/null >/dev/null 2>&1; then
-        tls_ok=true
-        break
+  # A store that loads is not the same as a store that works, and a network that
+  # works for one host is not the same as one that works for the host that counts.
+  # Probe client.earnapp.com, because that is where 'earnapp start' POSTs
+  # /install_device. Probing earnapp.com instead prints a green line on hosts where
+  # registration cannot possibly succeed: measured on a box that opened
+  # earnapp.com:443 fine while client.earnapp.com:443 timed out.
+  #
+  # Reachability and certificate validity are reported separately on purpose. The
+  # binary collapses both into "check internet connection and try again", and
+  # knowing which one failed is the difference between editing a firewall rule and
+  # rebuilding the trust store. Retried, because a proxy sidecar sharing this
+  # network namespace may still be bringing its tunnel up.
+  probe_host='client.earnapp.com'
+  reachable=false
+  verified=false
+  for attempt in 1 2 3; do
+    if timeout 8 bash -c "exec 3<>/dev/tcp/$probe_host/443" 2>/dev/null; then
+      reachable=true
+      if command -v openssl >/dev/null 2>&1; then
+        if openssl s_client -connect "$probe_host:443" -servername "$probe_host" \
+             -CAfile "$NODE_EXTRA_CA_CERTS" -verify_return_error -brief \
+             </dev/null >/dev/null 2>&1; then
+          verified=true
+        fi
+      else
+        # Nothing to verify with. Do not cry wolf about a store we cannot test.
+        verified=true
       fi
-      sleep 5
-    done
-    if [[ "$tls_ok" == true ]]; then
-      log "TLS check passed: earnapp.com validates against this trust store."
-    else
-      warn "TLS check FAILED: earnapp.com could not be verified with this store."
-      warn "Registration will probably report 'check internet connection and try"
-      warn "again'. Either the network is not up yet, something is intercepting"
-      warn "TLS, or the bundle is incomplete. Starting anyway in case it recovers."
+      [[ "$verified" == true ]] && break
     fi
+    (( attempt < 3 )) && sleep 5
+  done
+
+  if [[ "$reachable" == true && "$verified" == true ]]; then
+    log "Connectivity check passed: $probe_host:443 is reachable and its certificate validates."
+  elif [[ "$reachable" == false ]]; then
+    warn "Cannot open a TCP connection to $probe_host:443."
+    warn "This is reachability, not certificates: a firewall, a dead proxy tunnel,"
+    warn "or a route that drops the packets. Registration will report 'check"
+    warn "internet connection and try again' and it will be telling the truth."
+    warn "earnapp.com can be reachable while this host is not, so a browser test"
+    warn "proves nothing here."
+  else
+    warn "$probe_host:443 is reachable but its certificate did not verify."
+    warn "That is a trust store problem: the bundle is incomplete, or something is"
+    warn "intercepting TLS. Registration will report 'check internet connection and"
+    warn "try again'. Rebuild the image so the store is current."
   fi
 fi
 
@@ -137,6 +162,25 @@ shutdown() {
 }
 trap shutdown SIGTERM SIGINT
 
+# Verbosity. Worth understanding before turning this on: 'earnapp run' is silent.
+# Not quiet -- silent. It prints nothing with --verbose, nothing with NODE_DEBUG
+# and DEBUG both set, and it has no daemon and no native addon to hide the output
+# in; the binary suppresses it deliberately. 'earnapp start' is the one phase that
+# talks, and only when Node's own debug channels are on, at which point it dumps
+# TLS handshakes and every HTTP request it makes while registering.
+#
+# So there is nothing to gain from a log-viewing tool. Portainer, docker logs and
+# 'docker logs -f' all read the same stream, and if that stream is empty they all
+# show an empty pane. The only way to get detail is to make the process emit it.
+if [[ -n "${EARNAPP_DEBUG:-}" && "${EARNAPP_DEBUG,,}" != "0" && "${EARNAPP_DEBUG,,}" != "false" ]]; then
+  export NODE_DEBUG="${NODE_DEBUG:-tls,http}"
+  export DEBUG="${DEBUG:-*}"
+  warn "EARNAPP_DEBUG is on: NODE_DEBUG=$NODE_DEBUG DEBUG=$DEBUG"
+  warn "The registration phase will dump TLS handshakes and HTTP requests. Those"
+  warn "dumps include request headers and your node UUID, so treat this log as"
+  warn "account-identifying and do not paste it anywhere public."
+fi
+
 # 4. Supervise.
 log "Starting EarnApp."
 "$BIN_PATH" stop >/dev/null 2>&1
@@ -147,7 +191,14 @@ max_backoff=300
 registration_warned=false
 
 while true; do
-  "$BIN_PATH" start >/dev/null 2>&1
+  # Do not discard this, and do not pipe it either. It is the only output the
+  # binary produces, so redirecting it to /dev/null is what leaves a container
+  # with no logs at all -- but piping it through anything (sed, to prefix the
+  # lines, say) is nearly as bad: node block-buffers stdout when it is a pipe it
+  # does not own, and '- Registering Device...' arrives without a trailing
+  # newline, so nothing flushes. Measured: with a sed prefix the line had still
+  # not appeared 94 seconds in; without it, it shows up in under 8.
+  "$BIN_PATH" start 2>&1
   sleep 2
 
   start_time=$(date +%s)

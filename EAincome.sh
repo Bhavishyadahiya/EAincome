@@ -56,6 +56,11 @@ docker_entrypoint_path="$docker_folder/entrypoint.sh"
 earnapp_image_is_local=false
 earnapp_ca_params=""
 
+# Set from EARNAPP_DEBUG in properties.conf. Turns on Node's own debug channels
+# inside the container, which is the only way to get the earnapp binary to print
+# anything: 'earnapp run' is silent, and only the registration phase talks.
+earnapp_debug_params=""
+
 #Unique Id
 UNIQUE_ID=`cat /dev/urandom | LC_ALL=C tr -dc 'a-f0-9' | dd bs=1 count=32 2>/dev/null`
 
@@ -382,6 +387,17 @@ start_containers() {
     TUN_LOG_PARAM="${TUN2PROXY_LOG_LEVEL:-info}"
   fi
 
+  # Node's debug channels, off unless asked for. Worth knowing before enabling it:
+  # this only affects the registration phase, because 'earnapp run' prints nothing
+  # whatever you set. The output includes request headers and the node UUID, so
+  # the log becomes account-identifying.
+  if [[ "${EARNAPP_DEBUG:-false}" == true ]]; then
+    earnapp_debug_params="-e EARNAPP_DEBUG=1"
+    if [[ "$ENABLE_LOGS" != true && "$container_pulled" == false ]]; then
+      echo -e "${RED}EARNAPP_DEBUG is on but ENABLE_LOGS is false, so the output is discarded. Set ENABLE_LOGS=true.${NOCOLOUR}"
+    fi
+  fi
+
   # Starting tun2proxy container
   if [[ $i && $proxy ]]; then
     NETWORK_TUN="--network=container:tun$UNIQUE_ID$i"
@@ -442,7 +458,7 @@ start_containers() {
     fi
 
     check_container_exists earnapp$UNIQUE_ID$i
-    if CONTAINER_ID=$(sudo docker run -d --health-interval=24h --name earnapp$UNIQUE_ID$i $LOGS_PARAM $DNS_VOLUME --restart=always $NETWORK_TUN --mount type=bind,source=$PWD/$earnapp_data_folder/data$i,target=/etc/earnapp $earnapp_ca_params -e EARNAPP_UUID=$uuid "$EARNAPP_IMAGE"); then
+    if CONTAINER_ID=$(sudo docker run -d --health-interval=24h --name earnapp$UNIQUE_ID$i $LOGS_PARAM $DNS_VOLUME --restart=always $NETWORK_TUN --mount type=bind,source=$PWD/$earnapp_data_folder/data$i,target=/etc/earnapp $earnapp_ca_params $earnapp_debug_params -e EARNAPP_UUID=$uuid "$EARNAPP_IMAGE"); then
       echo -e "${GREEN}Container earnapp$UNIQUE_ID$i started successfully.${NOCOLOUR}"
     else
       echo -e "${RED}Failed to start container for Earnapp. Exiting..${NOCOLOUR}"

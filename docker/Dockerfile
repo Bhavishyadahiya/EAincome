@@ -16,7 +16,9 @@
 # refuses to produce an image if any of them cannot be verified. An image that
 # builds is therefore an image whose nodes can register, rather than one that only
 # looks correct. The entrypoint repeats the check on every start, since a trust
-# store can be broken later by a bind mount or by something intercepting TLS.
+# store can be broken later by a bind mount or by something intercepting TLS, and it
+# probes client.earnapp.com separately so that a firewalled host is reported as the
+# network fault it is instead of being mistaken for a certificate one.
 #
 # Three bugs in the community Dockerfiles are fixed here:
 #   1. The installer URL cdn-earnapp.b-cdn.net/static/earnapp/install.sh now 404s.
@@ -52,10 +54,10 @@ RUN apt-get update \
     && test -s "$NODE_EXTRA_CA_CERTS" \
     # Prove the bundle can actually validate the chains this node will meet.
     # brightdata.com and cdn.earnapp.com are already hard dependencies of this
-    # build, and earnapp.com is where registration happens, so a network outage
-    # would fail the build anyway. What this catches is the case that matters: a
-    # store that is present but cannot verify these hosts, which yields an image
-    # that looks fine and whose nodes never link.
+    # build, and client.earnapp.com is where registration happens, so a network
+    # outage would fail the build anyway. What this catches is the case that
+    # matters: a store that is present but cannot verify these hosts, which yields
+    # an image that looks fine and whose nodes never link.
     && for host in brightdata.com cdn.earnapp.com earnapp.com; do \
          if openssl s_client -connect "$host:443" -servername "$host" \
               -CAfile "$NODE_EXTRA_CA_CERTS" -verify_return_error -brief \
@@ -67,6 +69,18 @@ RUN apt-get update \
            exit 1; \
          fi; \
        done \
+    # client.earnapp.com is the host 'earnapp start' POSTs /install_device to, and
+    # it is firewalled on machines that reach earnapp.com perfectly well. Probe it,
+    # but do not fail the build over it: an image may legitimately be built on one
+    # host and run on another, and reachability is a property of the host, not of
+    # the image. A store that cannot verify it would have been caught above.
+    && if timeout 8 bash -c 'exec 3<>/dev/tcp/client.earnapp.com/443' 2>/dev/null; then \
+         echo "Reachability: client.earnapp.com:443 is open from this build host."; \
+       else \
+         echo "WARNING: client.earnapp.com:443 could not be opened from this build host."; \
+         echo "That is where registration POSTs /install_device. Nodes run on this host"; \
+         echo "will report 'check internet connection and try again' until it opens."; \
+       fi \
     # The installer probes for systemd tooling that does not exist in a container.
     # Inert shims stop it aborting. Written as static text on purpose: the
     # originals interpolated $(lsb_release -a) before lsb_release was installed,
@@ -87,7 +101,7 @@ RUN apt-get update \
     && if [ -f "$CONFIG_DIR/registered" ]; then \
          echo "Verified end to end: the earnapp binary completed a real registration during the build."; \
        else \
-         echo "Note: the installer left no registration marker. The TLS checks above passed, so this is more likely an installer change than a trust problem."; \
+         echo "Note: the installer left no registration marker. The TLS checks above passed, so read the client.earnapp.com reachability line before suspecting the trust store."; \
        fi
 
 # EAincome bind-mounts a host directory over /etc/earnapp for per-node state,

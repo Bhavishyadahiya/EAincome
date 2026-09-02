@@ -73,27 +73,37 @@ If registration fails with
 Failed registration: check internet connection and try again
 ```
 
-your internet is almost certainly fine. The `earnapp` binary is a self-contained
-Node application that bundles its own TLS stack, and it does not consult the
-operating system certificate store unless `NODE_EXTRA_CA_CERTS` points at a bundle.
-Certificate verification fails, and the binary reports that as a network problem.
+the message is not to be taken at face value -- but it is not always a lie either.
+Two quite different faults produce that same sentence.
 
-Installing `ca-certificates` on its own does not fix it. That was tested directly:
-an image with the package installed but the variable unset still failed to register,
-and the same image registered within seconds once the variable was set. The variable
-is the operative half.
+The common one is certificates. The `earnapp` binary is a self-contained Node
+application that bundles its own TLS stack, and it does not consult the operating
+system certificate store unless `NODE_EXTRA_CA_CERTS` points at a bundle.
+Verification fails, and the binary reports that as a network problem. Installing
+`ca-certificates` on its own does not fix it. That was tested directly: an image
+with the package installed but the variable unset still failed to register, and the
+same image registered within seconds once the variable was set. The variable is the
+operative half.
+
+The other one is a real reachability failure, and it hides well because it is
+host-specific. Registration talks to `client.earnapp.com`, not `earnapp.com`. A
+machine can open `earnapp.com:443` perfectly while `client.earnapp.com:443` times
+out, which means a browser test proves nothing and any check aimed at the wrong host
+will report a green light on a node that cannot possibly link.
 
 Nodes started by EAincome are already covered, and covered in a way that does not
 depend on the variable merely being set. The build verifies the store against the
 live BrightData and EarnApp chains and fails rather than shipping an image that
-cannot register. At startup the container checks the store again, because a bind
-mount or an intercepting proxy can break it after the image was built; if the
-variable is unset or points at nothing, it finds a usable bundle itself and says so
-in the log. The prebuilt-image path sets the variable on the `docker run` command
-line alongside a bind-mounted bundle from your host.
+cannot register. At startup the container probes `client.earnapp.com:443` itself and
+names which of the two faults it found: a connection that will not open is reported
+as reachability, a certificate that will not verify is reported as a trust store
+problem, and success is stated plainly. If the variable is unset or points at
+nothing, it finds a usable bundle itself and says so. The prebuilt-image path sets
+the variable on the `docker run` command line alongside a bind-mounted bundle from
+your host.
 
-So if a node will not link, `docker logs <container>` tells you which of these
-happened rather than leaving you to guess.
+So if a node will not link, `docker logs <container>` names the cause instead of
+leaving you to guess between a firewall and a certificate.
 
 For a **native install** managed by systemd, run the helper:
 
@@ -106,6 +116,70 @@ keeps it, and adds the variable to `earnapp.service` through a drop-in at
 `/etc/systemd/system/earnapp.service.d/override.conf`. A drop-in is used rather than
 an edit to the unit file so that updating or reinstalling EarnApp cannot quietly
 discard the fix. Afterwards, `sudo earnapp register` and claim the node.
+
+## Reading the logs
+
+No log viewer can help you here, and that is worth understanding before you install
+one. Portainer, `docker logs`, `docker logs -f` and everything else all read the same
+json-file stream; if the process wrote nothing, every one of them shows an empty
+pane. The only thing that changes what you see is making the process talk.
+
+By default a node reports its UUID, its EarnApp version, the certificate store in
+use, the result of the connectivity probe, and then `- Registering Device...`. That
+is enough to separate a certificate failure from an unreachable host, and it costs
+nothing.
+
+For more, set both of these in `properties.conf`:
+
+```
+ENABLE_LOGS=true
+EARNAPP_DEBUG=true
+```
+
+`EARNAPP_DEBUG` turns on Node's own debug channels (`NODE_DEBUG=tls,http` and
+`DEBUG=*`) inside the container. The registration attempt then dumps its TLS
+handshake and every HTTP request it makes, which is how you get a line like
+
+```
+HTTP 22: SOCKET ERROR: connect ETIMEDOUT 34.237.199.147:443
+Failed registration: check internet connection and try again
+```
+
+where before you had only the second line. Note that `ENABLE_LOGS=true` on its own
+is what preserves the output; `EARNAPP_DEBUG=true` without it is discarded, and the
+script says so rather than letting you wonder.
+
+**These logs identify your account.** The dumps include request headers and your
+node UUID, which appears in the `/install_device` query string. Treat a debug log
+like a credential: do not paste it into an issue, a forum, or a chat window.
+
+Turn it off again once the node links. It is a tool for diagnosing a node that will
+not register, not something to leave running.
+
+What debug output will *not* give you is an ongoing feed. `earnapp run`, the phase a
+healthy node spends its life in, prints nothing at all -- not with `--verbose`, not
+with both debug variables set. Measured on a running node: zero bytes added to the
+log in 35 seconds. Only the registration phase talks, so a silent log on a linked
+node is normal and is not evidence of anything.
+
+For the proxy half of a node, raise `TUN2PROXY_LOG_LEVEL` to `debug`, or `trace` for
+a line per relayed connection. That is the right tool for confirming whether a
+suspect node's traffic is reaching its exit, and it is unusable across dozens of
+nodes at once, so point it at one node rather than the whole fleet.
+
+One practical catch: Docker fixes a container's log driver when the container is
+created, so changing `ENABLE_LOGS`, the size limits or `EARNAPP_DEBUG` only takes
+effect on containers created afterwards. Recreate them with
+
+```bash
+sudo bash EAincome.sh --delete
+sudo bash EAincome.sh --start
+```
+
+and before you do, make sure `proxies.txt` still holds *every* proxy you intend to
+run. Nodes are matched to proxies by line number, so starting a partial list gives
+those nodes the UUIDs belonging to other lines and you end up with several
+containers claiming the same identity.
 
 ## Using proxies
 
@@ -163,6 +237,7 @@ near the node.
 | `LOG_MAX_SIZE` | `10m` | Log size per container before rotation, used only when `ENABLE_LOGS=true` |
 | `LOG_MAX_FILES` | `3` | Rotated files kept per container. Worst case on disk is size x files x containers |
 | `TUN2PROXY_LOG_LEVEL` | `info` | tun2proxy verbosity. Upstream uses `trace`, which logs every relayed connection on every node |
+| `EARNAPP_DEBUG` | `false` | Turns on `NODE_DEBUG`/`DEBUG` inside the earnapp container. Needs `ENABLE_LOGS=true`. Output is account-identifying -- see [Reading the logs](#reading-the-logs) |
 
 Upstream sets `max-size=100k` and leaves `max-file` at 1, which holds only two
 or three minutes of a busy node's output -- by the time you go looking, the thing
