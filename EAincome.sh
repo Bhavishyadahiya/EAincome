@@ -52,6 +52,21 @@ docker_folder="docker"
 dockerfile_path="$docker_folder/Dockerfile"
 docker_entrypoint_path="$docker_folder/entrypoint.sh"
 
+# Watchdog, run as a container supervised by Docker itself.
+#
+# The container name is derived from this folder rather than fixed, because one
+# host can hold several copies of this script and each needs its own watcher: they
+# are scoped by their own containernames.txt, and one shared name would mean the
+# second --watchdog silently replaced the first folder's watcher instead of adding
+# its own. The path checksum is in there because two copies can share a folder name
+# under different parents.
+watchdog_dockerfile_path="$docker_folder/watchdog.Dockerfile"
+watchdog_script="nodeWatchdog.sh"
+watchdog_name_prefix="eaincome-watchdog"
+watchdog_folder_slug=$(printf '%s' "${PWD##*/}" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -c 'a-z0-9_.-' '-' | cut -c1-24)
+watchdog_folder_hash=$(printf '%s' "$PWD" | cksum 2>/dev/null | awk '{print $1}')
+watchdog_container_name="${watchdog_name_prefix}-${watchdog_folder_slug:-folder}-${watchdog_folder_hash:-0}"
+
 # Set by resolve_earnapp_image
 earnapp_image_is_local=false
 earnapp_ca_params=""
@@ -301,6 +316,237 @@ build_earnapp_image() {
   fi
 }
 
+# Build the watchdog image.
+#
+# The watchdog runs as a container rather than as a cron job or a systemd unit,
+# because Docker is already the supervisor on this host: nothing new to install,
+# and it comes back after a reboot, which is the moment it earns its keep. A node
+# whose tun2proxy parent has not started yet fails to *start* rather than failing
+# to run, so its own restart policy never rescues it.
+#
+# The image ships gawk and GNU coreutils on purpose. The watchdog's cooldown and
+# restart cap are computed with awk's mktime(), which busybox awk lacks and mawk
+# only gained in 1.3.4, and container start times are ISO 8601 with fractional
+# seconds, which busybox date will not parse. Both failures are silent and both
+# weaken the guards that stop a node being restarted in a loop.
+build_watchdog_image() {
+  local tag="$1"
+
+  if [ ! -f "$watchdog_dockerfile_path" ] || [ ! -f "$watchdog_script" ]; then
+    echo -e "${RED}Cannot build the watchdog image because $watchdog_dockerfile_path${NOCOLOUR}"
+    echo -e "${RED}or $watchdog_script is missing. Restore them and try again.${NOCOLOUR}"
+    return 1
+  fi
+
+  echo -e "${YELLOW}Building the watchdog image $tag.${NOCOLOUR}"
+
+  local build_env=""
+  if ! sudo docker buildx version >/dev/null 2>&1; then
+    build_env="DOCKER_BUILDKIT=0"
+  fi
+
+  # The context is this folder rather than docker/, because nodeWatchdog.sh lives
+  # here. .dockerignore keeps everything but that script out of it, so earnapp.txt
+  # and proxies.txt are never sent to the daemon.
+  if sudo env $build_env docker build --pull -f "$watchdog_dockerfile_path" -t "$tag" .; then
+    echo -e "${GREEN}Built $tag successfully.${NOCOLOUR}"
+  else
+    # Deliberately not fatal: --start calls this after every node is already up,
+    # and losing the watchdog is not a reason to report that as a failure.
+    echo -e "${RED}Failed to build $tag.${NOCOLOUR}"
+    return 1
+  fi
+}
+
+# Every watchdog container bound to *this* folder. The bind mount, not the name, is
+# what makes a watcher this deployment's: it decides which containernames.txt the
+# watcher reads and therefore which nodes it may touch. Matching on it finds one
+# left behind under a different name by an older version of this script, and never
+# touches the watcher belonging to another EAincome folder on the same host.
+watchdogs_for_this_folder() {
+  local name src
+  while read -r name; do
+    [ -n "$name" ] || continue
+    src=$(sudo docker inspect \
+            -f '{{range .Mounts}}{{if eq .Destination "/eaincome"}}{{.Source}}{{end}}{{end}}' \
+            "$name" 2>/dev/null)
+    [ "$src" = "$PWD" ] && printf '%s\n' "$name"
+  done < <(sudo docker ps -a --filter "name=$watchdog_name_prefix" --format '{{.Names}}' 2>/dev/null)
+  return 0
+}
+
+# The watchdog's own container is written to containernames.txt alongside the nodes,
+# so that --delete tears it down through the same loop as everything else this
+# folder created, and so that the one command a user is told to run to clean up
+# really does leave nothing behind. It is safe for the watchdog to find its own name
+# in its own scope file: it only ever acts on names beginning with 'earnapp' that
+# also carry an EARNAPP_UUID, and this container is neither.
+record_watchdog_name() {
+  local name="$1"
+  if [ -f "$container_names_file" ] && grep -qxF "$name" "$container_names_file" 2>/dev/null; then
+    return 0
+  fi
+  if printf '%s\n' "$name" >> "$container_names_file" 2>/dev/null; then
+    echo -e "${GREEN}Recorded $name in $container_names_file, so --delete removes it too.${NOCOLOUR}"
+    return 0
+  fi
+  echo -e "${YELLOW}Could not record $name in $container_names_file. --delete still removes${NOCOLOUR}"
+  echo -e "${YELLOW}it, by looking for watchdogs bound to this folder.${NOCOLOUR}"
+  return 1
+}
+
+# Drop watchdog names from containernames.txt once the containers are gone, so the
+# --delete loop that follows does not report a container it has just removed as
+# missing. A file left holding nothing else is removed outright: a folder with no
+# nodes and no watcher should look untouched, or --start would refuse to run.
+forget_watchdog_names() {
+  [ -f "$container_names_file" ] || return 0
+  local tmp="${container_names_file}.$$"
+  grep -v "^${watchdog_name_prefix}" "$container_names_file" > "$tmp" 2>/dev/null
+  if [ ! -f "$tmp" ]; then
+    return 1
+  fi
+  if [ -s "$tmp" ]; then
+    mv "$tmp" "$container_names_file" 2>/dev/null || rm -f "$tmp"
+  else
+    rm -f "$tmp" "$container_names_file"
+  fi
+  return 0
+}
+
+# How many watchers other EAincome folders on this host have. Printed so that the
+# one-watcher-per-folder arrangement is visible rather than something to take on
+# trust.
+count_other_watchdogs() {
+  local total mine
+  total=$(sudo docker ps -a --filter "name=$watchdog_name_prefix" --format '{{.Names}}' 2>/dev/null | wc -l)
+  mine=$(watchdogs_for_this_folder | wc -l)
+  echo $(( total - mine ))
+}
+
+remove_watchdogs_for_this_folder() {
+  local name removed=1
+  while read -r name; do
+    [ -n "$name" ] || continue
+    if sudo docker rm -f "$name" >/dev/null 2>&1; then
+      echo -e "${GREEN}Removed the watchdog container $name.${NOCOLOUR}"
+      removed=0
+    else
+      echo -e "${RED}Could not remove the watchdog container $name.${NOCOLOUR}"
+    fi
+  done < <(watchdogs_for_this_folder)
+  forget_watchdog_names
+  return $removed
+}
+
+# --delete has to do this before it touches the nodes: a watchdog left running
+# would see them stop and start them straight back up, halfway through being
+# deleted. Only this folder's watcher is removed, so a --delete here leaves another
+# folder's nodes looked after.
+stop_watchdog() {
+  local list
+  list=$(watchdogs_for_this_folder)
+  [ -n "$list" ] || return 0
+  echo -e "${YELLOW}Removing this folder's watchdog container first, so that it cannot start${NOCOLOUR}"
+  echo -e "${YELLOW}nodes back up while they are being deleted.${NOCOLOUR}"
+  remove_watchdogs_for_this_folder
+  echo -e "${GREEN}Bring it back after the next --start with:${NOCOLOUR} sudo bash $script_name --watchdog"
+  return 0
+}
+
+# Create this folder's watchdog container. Idempotent: an existing one for this
+# folder is replaced, and one belonging to another folder is left alone.
+#
+# What it is given, and why each part is needed:
+#   the Docker socket  it has to be able to restart a node. That is root on this
+#                      host in all but name, which is why the image is built here
+#                      from a pinned base instead of pulled from a stranger.
+#   /host/proc, ro     traffic and socket counts are read out of each node's
+#                      network namespace via /proc, keyed by the host PID that
+#                      docker inspect reports, so it needs the host's /proc.
+#   this folder, rw    containernames.txt is what scopes it to this deployment's
+#                      nodes; watchdog.state and watchdog.log are written back
+#                      here so the sample history outlives the container.
+#   --network none     it never needs to reach the network itself.
+start_watchdog() {
+  local tag="${WATCHDOG_LOCAL_TAG:-eaincome/watchdog:local}"
+  local args="${WATCHDOG_ARGS:---watch --dry-run}"
+
+  local scoped=0
+  if [ -f "$container_names_file" ]; then
+    scoped=$(grep -c "^earnapp" "$container_names_file" 2>/dev/null || true)
+  fi
+  if [ "${scoped:-0}" -gt 0 ]; then
+    echo -e "${GREEN}Scope: the $scoped earnapp container(s) named in $container_names_file.${NOCOLOUR}"
+    echo -e "${GREEN}The tunnels listed in that file are not candidates, by name and again by${NOCOLOUR}"
+    echo -e "${GREEN}the absence of EARNAPP_UUID. No other folder's nodes are visible to it.${NOCOLOUR}"
+  else
+    echo -e "${YELLOW}Note: $container_names_file names no earnapp containers yet, so the watchdog${NOCOLOUR}"
+    echo -e "${YELLOW}has nothing to watch. It re-reads that file every pass and will pick this${NOCOLOUR}"
+    echo -e "${YELLOW}folder's nodes up by itself once --start has created them. It will not watch${NOCOLOUR}"
+    echo -e "${YELLOW}another EAincome folder's nodes in the meantime.${NOCOLOUR}"
+  fi
+
+  if sudo docker image inspect "$tag" >/dev/null 2>&1; then
+    echo -e "${GREEN}Reusing the watchdog image already built on this host: $tag${NOCOLOUR}"
+    echo -e "${GREEN}To rebuild it after changing $watchdog_script:${NOCOLOUR} sudo docker build --pull -f $watchdog_dockerfile_path -t $tag ."
+  else
+    build_watchdog_image "$tag" || return 1
+  fi
+
+  remove_watchdogs_for_this_folder
+
+  # Thresholds belong in properties.conf like every other setting, but only the
+  # ones actually set are forwarded, so the defaults stay in one place: the script.
+  # Anything that is not a plain number is refused rather than passed on, because
+  # docker run would read the stray words as arguments of its own.
+  local threshold_params=""
+  local key value
+  for key in GRACE STALL_WINDOW STALL_BYTES MIN_SOCKETS COOLDOWN CAP CAP_WINDOW INTERVAL; do
+    value="${!key:-}"
+    [ -n "$value" ] || continue
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+      threshold_params="$threshold_params -e $key=$value"
+    else
+      echo -e "${RED}Ignoring $key='$value' from $properties_file: it must be a plain${NOCOLOUR}"
+      echo -e "${RED}number of seconds or bytes, with no text after it. Using the default.${NOCOLOUR}"
+    fi
+  done
+
+  # Its own log is bounded but always on, whatever ENABLE_LOGS says. This is one
+  # container, its output is the audit trail of everything it restarted, and
+  # watchdog.log in this folder is the copy that survives the container.
+  if sudo docker run -d --name "$watchdog_container_name" \
+       --restart=always \
+       --network none \
+       --log-driver=json-file --log-opt max-size=10m --log-opt max-file=2 \
+       -v /var/run/docker.sock:/var/run/docker.sock \
+       -v /proc:/host/proc:ro \
+       -v "$PWD:/eaincome" \
+       $threshold_params \
+       "$tag" $args >/dev/null; then
+    record_watchdog_name "$watchdog_container_name"
+    echo -e "${GREEN}Watchdog started as container $watchdog_container_name with:${NOCOLOUR} $args"
+    echo -e "${GREEN}Follow it with:${NOCOLOUR} sudo docker logs -f $watchdog_container_name"
+    echo -e "${GREEN}Its findings are also appended to:${NOCOLOUR} $PWD/watchdog.log"
+    if [[ "$args" == *"--dry-run"* || "$args" == *" -n"* || "$args" == "--report"* ]]; then
+      echo -e "${YELLOW}It will not actually restart anything with those arguments. Once you are${NOCOLOUR}"
+      echo -e "${YELLOW}satisfied with what it reports, set WATCHDOG_ARGS='--watch' in${NOCOLOUR}"
+      echo -e "${YELLOW}$properties_file and run --watchdog again.${NOCOLOUR}"
+    fi
+    local others
+    others=$(count_other_watchdogs)
+    if [ "${others:-0}" -gt 0 ]; then
+      echo -e "${GREEN}$others watchdog container(s) on this host belong to other EAincome folders.${NOCOLOUR}"
+      echo -e "${GREEN}Each looks after its own nodes only. See them all with:${NOCOLOUR} sudo docker ps --filter name=$watchdog_name_prefix"
+    fi
+    echo -e "${YELLOW}Note that --delete removes this container, on purpose.${NOCOLOUR}"
+  else
+    echo -e "${RED}Failed to start $watchdog_container_name.${NOCOLOUR}"
+    return 1
+  fi
+}
+
 # Decide which EarnApp image to run, and how to give it a usable TLS trust store.
 #
 # The earnapp binary is a bundled Node application. It ignores the operating
@@ -516,6 +762,16 @@ if [[ "$1" == "--start" ]]; then
 
   for file in "${files_to_be_removed[@]}"; do
     if [ -f "$file" ]; then
+      # One exception. --watchdog records its container in containernames.txt so that
+      # --delete removes it too, and it is allowed to run before any node exists. A
+      # file holding nothing but watchdog names is therefore not the leftover of a
+      # previous batch, and --start appends this batch's containers to it as usual.
+      if [ "$file" = "$container_names_file" ] &&
+         ! grep -qvE "^(${watchdog_name_prefix}[^[:space:]]*)?$" "$file" 2>/dev/null; then
+        echo -e "${YELLOW}$container_names_file exists but names only this folder's watchdog, which is${NOCOLOUR}"
+        echo -e "${YELLOW}not a running batch. Continuing, and adding this batch's containers to it.${NOCOLOUR}"
+        continue
+      fi
       echo -e "${RED}File $file still exists, there might be containers still running. Please stop them and delete before running the script. Exiting..${NOCOLOUR}"
       echo -e "To stop and delete containers run the following command\n"
       echo -e "${YELLOW}sudo bash $script_name --delete${NOCOLOUR}\n"
@@ -603,6 +859,13 @@ if [[ "$1" == "--start" ]]; then
   # Remove Process file
   rm -f $process_id_file
 
+  # Opt-in, and deliberately last: containernames.txt is complete by now, which is
+  # what confines the watchdog to the nodes this folder just created.
+  if [ "${WATCHDOG:-false}" = true ]; then
+    echo -e "\n${YELLOW}WATCHDOG is enabled, starting the node watchdog..${NOCOLOUR}"
+    start_watchdog || echo -e "${RED}Nodes are up regardless; start it later with:${NOCOLOUR} sudo bash $script_name --watchdog"
+  fi
+
   SCRIPT_END_TIME=$(date +%s)
   TOTAL_TIME=$((SCRIPT_END_TIME - SCRIPT_START_TIME))
 
@@ -639,10 +902,48 @@ if [[ "$1" == "--build" ]]; then
   exit 0
 fi
 
+# Run the node watchdog as a container supervised by Docker
+#
+# Docker is already the supervisor on this host, so there is no systemd unit to
+# write and no crontab to maintain, and --restart=always brings it back after a
+# reboot. That is exactly when it is needed: a node whose tun2proxy parent had not
+# started yet fails to *start* rather than failing to run, so its own restart
+# policy never rescues it and it stays dead until something starts the pair in
+# order.
+#
+# Rerunning this replaces the existing watchdog container, so it doubles as the
+# way to apply a changed WATCHDOG_ARGS or a new threshold.
+if [[ "$1" == "--watchdog" ]]; then
+  echo -e "\n\nStarting the node watchdog.."
+
+  load_properties
+
+  if [ ! -f "$watchdog_script" ]; then
+    echo -e "${RED}$watchdog_script is missing from this folder, exiting..${NOCOLOUR}"
+    exit 1
+  fi
+
+  echo -e "${YELLOW}The watchdog is given this host's Docker socket, because restarting a node${NOCOLOUR}"
+  echo -e "${YELLOW}is the whole point of it. That is root-equivalent access to this host, so the${NOCOLOUR}"
+  echo -e "${YELLOW}image is built here from a pinned base rather than pulled from a stranger.${NOCOLOUR}\n"
+
+  start_watchdog || exit 1
+  exit 0
+fi
+
 # Delete containers and networks
 if [[ "$1" == "--delete" ]]; then
   echo -e "\n\nDeleting Containers and networks.."
   SCRIPT_START_TIME=$(date +%s)
+
+  # Before anything else. The watchdog exists to start nodes that are not running,
+  # and a deletion looks exactly like that from the outside: it would race this
+  # loop, starting containers back up as they are stopped. Its name is in
+  # containernames.txt as well, so the loop below would eventually remove it -- but
+  # only after every node had been through the race. This removes it first and takes
+  # its name back out of the file, which is why the loop does not then report it
+  # missing.
+  stop_watchdog
 
   # Check if there is already a running process
   if [ -f "$process_id_file" ]; then
@@ -814,4 +1115,4 @@ if [[ "$1" == "--deleteBackup" ]]; then
   exit 0
 fi
 
-echo -e "Valid options are: ${RED}--start${NOCOLOUR}, ${RED}--delete${NOCOLOUR}, ${RED}--deleteBackup${NOCOLOUR}, ${RED}--build${NOCOLOUR}, ${RED}--install${NOCOLOUR}"
+echo -e "Valid options are: ${RED}--start${NOCOLOUR}, ${RED}--delete${NOCOLOUR}, ${RED}--deleteBackup${NOCOLOUR}, ${RED}--build${NOCOLOUR}, ${RED}--watchdog${NOCOLOUR}, ${RED}--install${NOCOLOUR}"

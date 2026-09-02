@@ -1,0 +1,9 @@
+# Build context for docker/watchdog.Dockerfile, which is built from this folder
+# because nodeWatchdog.sh lives here.
+#
+# Exclude everything, then re-include only the script. Nothing else belongs in the
+# context: earnapp.txt holds node UUIDs and proxies.txt holds proxy credentials,
+# neither of which should be sent to the Docker daemon, and earnappdata/ would make
+# the build slow for no reason.
+*
+!nodeWatchdog.sh

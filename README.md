@@ -25,11 +25,13 @@ device.
 | `--install` | Installs Docker, plus binfmt emulation on ARM hosts |
 | `--build` | Builds the EarnApp image without starting anything |
 | `--start` | Starts one EarnApp node per proxy, or a single node on your direct connection |
+| `--watchdog` | Runs the node watchdog as a Docker-supervised container. Needs the Docker socket -- read [that section](#running-the-watchdog-as-a-container) first |
 | `--delete` | Stops and removes all containers, then cleans up stale ones |
 | `--deleteBackup` | Removes `earnapp.txt`. Do this only if you want to abandon your node UUIDs |
 
 `--delete` deliberately keeps `earnapp.txt`, so a stop/start cycle reuses the same
-node UUIDs and your dashboard links stay valid.
+node UUIDs and your dashboard links stay valid. It does remove the watchdog
+container, so that it cannot start nodes back up mid-deletion.
 
 ## The EarnApp image
 
@@ -238,6 +240,9 @@ near the node.
 | `LOG_MAX_FILES` | `3` | Rotated files kept per container. Worst case on disk is size x files x containers |
 | `TUN2PROXY_LOG_LEVEL` | `info` | tun2proxy verbosity. Upstream uses `trace`, which logs every relayed connection on every node |
 | `EARNAPP_DEBUG` | `false` | Turns on `NODE_DEBUG`/`DEBUG` inside the earnapp container. Needs `ENABLE_LOGS=true`. Output is account-identifying -- see [Reading the logs](#reading-the-logs) |
+| `WATCHDOG` | `false` | Start the node watchdog container at the end of `--start`. Needs the Docker socket -- see [Running the watchdog as a container](#running-the-watchdog-as-a-container) |
+| `WATCHDOG_LOCAL_TAG` | `eaincome/watchdog:local` | Tag given to the locally built watchdog image |
+| `WATCHDOG_ARGS` | `--watch --dry-run` | How the watchdog runs. Drop `--dry-run` to let it actually restart nodes |
 
 Upstream sets `max-size=100k` and leaves `max-file` at 1, which holds only two
 or three minutes of a busy node's output -- by the time you go looking, the thing
@@ -309,6 +314,108 @@ Run it as root or as a user in the `docker` group. Nodes are found by the
 `EARNAPP_UUID` environment variable rather than by container name, so a `tun*`
 container can never be picked as a candidate -- restarting one would tear the
 network namespace out from under the node sharing it.
+
+### Running the watchdog as a container
+
+Rather than a systemd unit or a crontab entry, let Docker supervise it -- Docker
+is already the supervisor on this host:
+
+```bash
+sudo bash EAincome.sh --watchdog
+```
+
+That builds `docker/watchdog.Dockerfile` on first use, tags it
+`eaincome/watchdog:local`, and runs it with `--restart=always`, so it survives a
+reboot. Setting `WATCHDOG=true` in `properties.conf` does the same thing
+automatically at the end of `--start`. Rerunning `--watchdog` replaces this
+folder's container, which is how you apply a changed `WATCHDOG_ARGS` or threshold.
+
+It starts in `--watch --dry-run`, logging what it *would* restart and touching
+nothing. Watch it for a day, and once its verdicts match what you believe about
+your nodes, set `WATCHDOG_ARGS='--watch'` and run `--watchdog` again.
+
+A dry run is a faithful preview, not a running commentary: it applies `COOLDOWN`
+and `CAP` to its own `DRY-RUN would RESTART` lines, so a node it would restart
+produces one line every half hour rather than one every minute, and goes quiet
+after three in six hours -- exactly what a live run would have done. The two
+ledgers are kept apart, so switching to `--watch` starts from a clean slate and
+never inherits a cooldown from a restart that never happened.
+
+```bash
+sudo docker ps --filter name=eaincome-watchdog   # every watcher on this host
+sudo docker logs -f eaincome-watchdog-<folder>   # live, one folder's watcher
+cat watchdog.log                                 # the same findings, kept on disk
+```
+
+**The watchdog is given this host's Docker socket.** It has to be: restarting a
+container is the entire point of it. Anything holding that socket can do anything
+Docker can do, which on a normal host is equivalent to root. That is why the image
+is built locally from a pinned `docker:28-cli` base rather than pulled from
+someone else's registry, why the build context is limited by `.dockerignore` to
+the one script it needs (`earnapp.txt` and `proxies.txt` are never sent to the
+daemon), and why it runs with `--network none`. If that trade is not one you want
+to make, use `--cron` or run the script by hand instead; everything works the same
+way, only unsupervised.
+
+The container also needs the host's `/proc` mounted read-only at `/host/proc`. The
+PIDs it samples come from `docker inspect` and belong to the host's PID namespace,
+so they mean nothing against the container's own `/proc`. And it needs its own
+folder bind-mounted, which is how `watchdog.state` and `watchdog.log` end up on
+the host instead of vanishing with the container.
+
+### One watcher per folder
+
+Several copies of EAincome on one host each get their own watcher, and each looks
+after only its own nodes. Three things arrange that, and they overlap on purpose.
+
+**The name.** It is derived from the folder the watcher was started in
+(`eaincome-watchdog-<folder>-<checksum of the path>`), so a second `--watchdog`
+elsewhere adds a watcher rather than replacing yours. Two folders with the same
+basename under different parents still differ, because the checksum is of the full
+path.
+
+**What `--delete` removes.** The watcher's name is written into
+`containernames.txt` alongside the containers, so the same loop that removes the
+nodes removes it. `--delete` also looks up watchers by their `/eaincome` bind mount
+before it starts, which catches one whose name was never recorded -- started by
+hand, or by an older version of this script -- and which is what confines it to the
+folder you ran it in. A watcher belonging to another folder is never matched by
+either route.
+
+**What it may look at.** Scope is `containernames.txt` in the watcher's own folder,
+and within that file only names beginning with `earnapp`. EAincome names a node
+`earnapp<UNIQUE_ID><n>` and its tunnel `tun<UNIQUE_ID><n>`, so that one word keeps
+the watcher off the tunnels the file lists beside them -- and off its own container.
+`UNIQUE_ID` is fresh per `--start`, so no other folder's container can be named in
+your file in the first place. `EARNAPP_UUID` is then checked as well, because
+restarting a tun2proxy container would pull the network namespace out from under
+the node sharing it and that is worth being sure of twice.
+
+A watcher never widens its own scope. If `containernames.txt` is missing, empty, or
+names no `earnapp` container yet, it watches nothing and says so, because the
+alternative would be ugly -- `--delete` removes that file, so a watcher whose own
+folder had been emptied would otherwise adopt every other folder's nodes. The file
+is re-read every pass, so a watcher started before `--start` sits idle and picks up
+its nodes as soon as they exist. Only `SCOPE_FILE=` (explicitly empty) watches every
+node on the host.
+
+Starting the watchdog before `--start` therefore leaves a `containernames.txt` that
+holds nothing but the watcher's name. `--start` recognises that for what it is and
+carries on, appending the batch to it, rather than refusing on the grounds that a
+previous deployment is still running.
+
+Finally, `--delete` removes the watchdog container before it stops anything else,
+on purpose. A deletion looks exactly like an outage from the watchdog's point of
+view, so a watcher left running would start nodes back up halfway through being
+deleted. Bring it back with `--watchdog` after the next `--start`.
+
+All folders share one image, since the script inside it is the same. After editing
+`nodeWatchdog.sh`, rebuild once and restart each watcher:
+
+```bash
+sudo docker build --pull -f docker/watchdog.Dockerfile -t eaincome/watchdog:local .
+sudo bash EAincome.sh --watchdog    # in each folder
+```
 
 `earnappStatus.sh` is the optional counterpart: it asks the EarnApp dashboard
 what it thinks of your nodes and prints one row per node, mapping each node ID
