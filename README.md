@@ -177,32 +177,12 @@ link. See the troubleshooting section above.
 
 `restart.sh` restarts every container listed in `containernames.txt`.
 
-`earnappStatus.sh` asks the EarnApp dashboard what it thinks of your nodes and
-prints one row per node, mapping each node ID back to the container running it.
-This is the only reliable way to tell a node that has stopped earning from one
-that is fine: the `earnapp` binary writes nothing to stdout once it is running,
-even with `--verbose`, and its own SDK log is encrypted, so a red node looks
-identical from inside the container to a green one.
-
-It needs your dashboard session cookie. Sign in at
-<https://earnapp.com/dashboard>, open developer tools, find the
-`oauth-refresh-token` cookie for `earnapp.com`, and save it:
-
-```bash
-umask 077; printf '%s' 'PASTE_THE_COOKIE_VALUE' > ~/.earnapp_token
-bash earnappStatus.sh
-```
-
-That cookie is equivalent to being signed in to your account. It is gitignored,
-the script only ever reads it from a file, and it is passed to curl through a
-private config file so it never appears in `ps` output. Never paste it into a
-chat or a terminal argument.
-
-The script only reads; it restarts nothing. It exits 0 when every node is
-earning and 1 when at least one is not, so it also works as a cron check. Use
-`--shape` if the output ever stops making sense -- the dashboard API is
-undocumented and has changed before, and `--shape` prints the structure with all
-values redacted, which is safe to share.
+This branch ships no status tool and no watchdog, so nothing on this host can tell
+you whether a node is still earning. The `earnapp` binary writes nothing to stdout
+once it is running, even with `--verbose`, and its own SDK log is encrypted, so a
+node that has been banned or has quietly stopped earning looks identical from
+inside the container to one that is working. Health has to be judged from outside
+the host, and acted on here with `restart.sh` or `docker restart`.
 
 `updateProxies.sh` is a leftover that hot-swapped the proxy address inside
 `xjasonlyu/tun2socks` containers. tun2proxy takes its proxy as a command-line

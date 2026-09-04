@@ -17,9 +17,4 @@ earnappdata/
 # Remove this line if you want to version your proxy list in a private repo.
 proxies.txt
 
-# Dashboard API credentials for earnappStatus.sh / nodeWatchdog.sh.
-# The oauth-refresh-token cookie is a live session for your EarnApp account.
-.earnapp_token
-watchdog.state
-
 *.log

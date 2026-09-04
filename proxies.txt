@@ -1,2 +1,29 @@
-#Add your proxies below in each line in the format protocol://username:password@ip:port or protocol://ip:port
-#Supported protocols: http, https, socks4, socks5
+# One proxy per line, in the format protocol://username:password@host:port, or
+# protocol://host:port if the proxy needs no credentials. This file is only read
+# when USE_PROXIES=true in properties.conf; otherwise a single node runs on the
+# host's own connection and this list is ignored.
+#
+# Supported protocols: http, https, socks4, socks5. Everything is routed through
+# tun2proxy, so shadowsocks (ss://) is rejected with an error rather than skipped.
+# socks5h:// and socks4a:// are accepted, and rewritten to socks5:// and socks4://
+# in this file on --start: tun2proxy resolves DNS itself, so the remote-DNS aliases
+# carry no extra meaning.
+#
+# Blank lines and lines beginning with # are ignored. --start also strips carriage
+# returns and surrounding whitespace from this file in place, so a list saved on
+# Windows works without converting it first.
+#
+# ORDER MATTERS. Nodes are numbered by their position among the non-comment lines
+# here, and node N takes its identity from line N of earnapp.txt. Commenting a
+# proxy out or reordering the list therefore moves every node below it onto a
+# different identity. Starting a shortened list while a full batch is still running
+# gives the new nodes the same UUIDs as the first few of the old batch, which is two
+# containers claiming one device. Append new proxies at the end and leave the lines
+# above them alone.
+#
+# Proxies cannot be swapped in place, because tun2proxy takes its proxy as a
+# command-line argument. To change one, edit the line and run --delete followed by
+# --start. --delete does not touch earnapp.txt, so your node UUIDs and the dashboard
+# links built from them survive.
+#
+# Add your proxies below.
