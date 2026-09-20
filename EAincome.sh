@@ -36,8 +36,9 @@ networks_file="networks.txt"
 restart_file="restart.sh"
 dns_resolver_file="resolv.conf"
 process_id_file="process.pid"
+node_map_file="nodemap.txt"
 required_files=($banner_file $properties_file $restart_file)
-files_to_be_removed=($dns_resolver_file $container_names_file $networks_file $process_id_file)
+files_to_be_removed=($dns_resolver_file $container_names_file $networks_file $process_id_file $node_map_file)
 folders_to_be_removed=($earnapp_data_folder)
 back_up_folders=()
 back_up_files=($earnapp_file)
@@ -444,6 +445,15 @@ start_containers() {
     check_container_exists earnapp$UNIQUE_ID$i
     if CONTAINER_ID=$(sudo docker run -d --health-interval=24h --name earnapp$UNIQUE_ID$i $LOGS_PARAM $DNS_VOLUME --restart=always $NETWORK_TUN --mount type=bind,source=$PWD/$earnapp_data_folder/data$i,target=/etc/earnapp $earnapp_ca_params -e EARNAPP_UUID=$uuid "$EARNAPP_IMAGE"); then
       echo -e "${GREEN}Container earnapp$UNIQUE_ID$i started successfully.${NOCOLOUR}"
+      # Record which node id landed in which container. Nothing inside a container
+      # knows whether its node is banned or offline: the earnapp binary is silent
+      # and its SDK log is encrypted, so that verdict exists only in the dashboard,
+      # which speaks in node ids and knows nothing about containers. This file is
+      # the only thing that can turn one of those ids back into something
+      # restartable. It is written per folder, so a watcher reading it can act on
+      # the nodes this folder started and is structurally unable to touch another
+      # folder's, or another host's.
+      printf '%s %s\n' "$uuid" "earnapp$UNIQUE_ID$i" >> "$node_map_file"
     else
       echo -e "${RED}Failed to start container for Earnapp. Exiting..${NOCOLOUR}"
       exit 1
@@ -620,6 +630,55 @@ if [[ "$1" == "--build" ]]; then
   echo -e "${GREEN}Build runtime: $(format_duration $TOTAL_TIME)${NOCOLOUR}"
   echo -e "${GREEN}========================================${NOCOLOUR}"
 
+  exit 0
+fi
+
+# Rebuild nodemap.txt from the containers that are already running.
+#
+# --start writes that file as it creates each node, which is no help to a deployment
+# that predates this feature, and no help once the file has been lost. Every node
+# carries its own id in EARNAPP_UUID, so the mapping can be recovered from Docker
+# alone: no dashboard, no cookies, no restarting anything, and the nodes keep
+# earning while it runs.
+#
+# Scope is this folder's containernames.txt, the same rule the rest of the script
+# follows. Containers another folder or another stack started are never listed even
+# when they are running on this same host, and a container with no EARNAPP_UUID is
+# skipped rather than guessed at, which is what keeps tun2proxy parents out.
+if [[ "$1" == "--nodemap" ]]; then
+  if [ ! -f "$container_names_file" ]; then
+    echo -e "${RED}$container_names_file does not exist, so nothing was started from this folder. Exiting..${NOCOLOUR}"
+    exit 1
+  fi
+  written=0
+  skipped=0
+  missing=0
+  tmp_map=$(mktemp)
+  while IFS= read -r cname || [ -n "$cname" ]; do
+    [ -z "$cname" ] && continue
+    if ! sudo docker inspect --type container "$cname" >/dev/null 2>&1; then
+      missing=$((missing + 1))
+      continue
+    fi
+    uuid=$(sudo docker inspect --type container "$cname" \
+             --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+           | sed -n 's/^EARNAPP_UUID=//p' | head -1)
+    if [ -n "$uuid" ]; then
+      printf '%s %s\n' "$uuid" "$cname" >> "$tmp_map"
+      written=$((written + 1))
+    else
+      skipped=$((skipped + 1))
+    fi
+  done < "$container_names_file"
+  if [ "$written" -eq 0 ]; then
+    rm -f "$tmp_map"
+    echo -e "${RED}No container listed in $container_names_file carries EARNAPP_UUID. Nothing written.${NOCOLOUR}"
+    exit 1
+  fi
+  mv "$tmp_map" "$node_map_file"
+  echo -e "${GREEN}Wrote $written node id(s) to $node_map_file.${NOCOLOUR}"
+  echo -e "${GREEN}Skipped $skipped container(s) carrying no node id, and $missing name(s) no longer running.${NOCOLOUR}"
+  echo -e "${YELLOW}$node_map_file pairs node ids with container names, so treat it like $earnapp_file: it is gitignored, and it should stay that way.${NOCOLOUR}"
   exit 0
 fi
 

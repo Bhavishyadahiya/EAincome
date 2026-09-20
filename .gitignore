@@ -2,6 +2,10 @@
 # earnapp.txt holds your node UUIDs, which are effectively account secrets.
 earnapp.txt
 containernames.txt
+# nodemap.txt pairs those same UUIDs with container names for an external watcher.
+nodemap.txt
+# The bearer token nodeWatcher.sh uses to read the node id feed.
+.watch_token
 networks.txt
 process.pid
 resolv.conf
