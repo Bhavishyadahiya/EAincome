@@ -48,6 +48,41 @@ set -uo pipefail
 
 # ---------------------------------------------------------------- configuration
 
+# Watcher settings may live in properties.conf, the same file EAincome.sh --start
+# reads, so every knob is in one documented place rather than only on the command
+# line. Precedence is environment over file over the built-in defaults below: an
+# explicit VAR=... in front of the command always wins, then properties.conf fills
+# in whatever the environment did not set, then anything still unset falls to its
+# default. Only the watcher's own keys are read; the rest of properties.conf, which
+# is about starting nodes, is ignored.
+PROPERTIES_FILE=${PROPERTIES_FILE:-properties.conf}
+
+load_config() {
+  [[ -f "$PROPERTIES_FILE" ]] || return 0
+  local line key value
+  local wanted=" WATCH_URL TOKEN_FILE MAP_FILE LOG_FILE MAX_LOG_LINES INTERVAL CURL_TIMEOUT MAX_AGE GRACE COOLDOWN CAP CAP_WINDOW FLEET_MAX_BAD BANNED_ACTION OFFLINE_ACTION "
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line=${line//$'\r'/}
+    [[ "$line" == \#* || "$line" != *=* ]] && continue
+    key=${line%%=*}
+    key=${key//[[:space:]]/}
+    [[ "$wanted" == *" $key "* ]] || continue
+    # The environment wins, so a key already set there is left untouched.
+    [[ -n ${!key+set} ]] && continue
+    value=${line#*=}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    # Strip one matching layer of surrounding quotes, as the values in
+    # properties.conf are written quoted.
+    case "$value" in
+      \"*\") value=${value#\"}; value=${value%\"} ;;
+      \'*\') value=${value#\'}; value=${value%\'} ;;
+    esac
+    printf -v "$key" '%s' "$value"
+  done < "$PROPERTIES_FILE"
+}
+load_config
+
 # Where the feed lives. No default: a wrong guess here would be a silent no-op.
 WATCH_URL=${WATCH_URL:-}
 
@@ -125,9 +160,10 @@ Options:
   -n, --dry-run   never restart anything; log what would have happened
   -h, --help      this text
 
-Configuration is read from the environment. WATCH_URL is required; the bearer
-token is read from TOKEN_FILE (default .watch_token) and never from an argument.
-See the comments at the top of this file for the rest.
+Configuration comes from properties.conf (the watcher keys only) and from the
+environment, with the environment taking precedence. WATCH_URL is required; the
+bearer token is read from TOKEN_FILE (default .watch_token) and never from an
+argument. See the comments at the top of this file for the rest.
 EOF
 }
 
