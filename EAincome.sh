@@ -53,6 +53,16 @@ docker_folder="docker"
 dockerfile_path="$docker_folder/Dockerfile"
 docker_entrypoint_path="$docker_folder/entrypoint.sh"
 
+# Feed-driven node watcher (see docker/watcher.Dockerfile and nodeWatcher.sh).
+# The watcher script sits at the repo root, so the watcher image is built with the
+# whole folder as its build context and only COPYs that one file into the image.
+node_watcher_script="nodeWatcher.sh"
+watcher_dockerfile_path="$docker_folder/watcher.Dockerfile"
+# One watcher per folder, named after the folder so a rerun finds and replaces its
+# own. Scope is enforced by the /eaincome bind mount, not this name (see
+# watchers_for_this_folder), so a name collision across folders is still safe.
+watcher_name="eaincome-watcher-$(printf '%s' "${PWD##*/}" | LC_ALL=C tr -c 'a-zA-Z0-9_.-' '_')"
+
 # Set by resolve_earnapp_image
 earnapp_image_is_local=false
 earnapp_ca_params=""
@@ -294,6 +304,134 @@ build_earnapp_image() {
   else
     echo -e "${RED}Failed to build $tag. Exiting..${NOCOLOUR}"
     exit 1
+  fi
+}
+
+# Build the local watcher image (docker/watcher.Dockerfile), once, then reuse it.
+# Unlike the EarnApp image the build context is the repo root, because the file it
+# ships -- nodeWatcher.sh -- lives there; the Dockerfile COPYs only that one file,
+# so nothing else in the folder enters the image.
+build_watcher_image() {
+  local tag="$1"
+
+  if sudo docker image inspect "$tag" >/dev/null 2>&1; then
+    echo -e "${GREEN}Reusing the watcher image already built on this host: $tag${NOCOLOUR}"
+    return 0
+  fi
+
+  if [ ! -f "$watcher_dockerfile_path" ] || [ ! -f "$node_watcher_script" ]; then
+    echo -e "${RED}Cannot build the watcher image because $watcher_dockerfile_path${NOCOLOUR}"
+    echo -e "${RED}or $node_watcher_script is missing. Restore them, or set NODE_WATCHER=false${NOCOLOUR}"
+    echo -e "${RED}in $properties_file. Exiting..${NOCOLOUR}"
+    exit 1
+  fi
+
+  echo -e "${YELLOW}Building watcher image $tag.${NOCOLOUR}"
+  echo -e "${YELLOW}This takes a moment the first time and is then cached.${NOCOLOUR}"
+
+  # buildx is not installed everywhere; fall back to the classic builder.
+  local build_env=""
+  if ! sudo docker buildx version >/dev/null 2>&1; then
+    build_env="DOCKER_BUILDKIT=0"
+  fi
+
+  if sudo env $build_env docker build -t "$tag" -f "$watcher_dockerfile_path" "$PWD"; then
+    echo -e "${GREEN}Built $tag successfully.${NOCOLOUR}"
+  else
+    echo -e "${RED}Failed to build $tag. Exiting..${NOCOLOUR}"
+    exit 1
+  fi
+}
+
+# Print the name of every watcher container tied to THIS folder. A watcher is the
+# only container that bind-mounts this folder at /eaincome, so that mount -- not
+# the image tag or the name -- is what ties it here. Several copies of this script
+# on one host therefore never see, restart, or delete each other's watcher.
+watchers_for_this_folder() {
+  local id src
+  for id in $(sudo docker ps -aq 2>/dev/null); do
+    src=$(sudo docker inspect -f '{{range .Mounts}}{{if eq .Destination "/eaincome"}}{{.Source}}{{end}}{{end}}' "$id" 2>/dev/null)
+    if [ "$src" = "$PWD" ]; then
+      sudo docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##'
+    fi
+  done
+}
+
+# Remove this folder's watcher(s). Used before starting a new one (so a rerun does
+# not leave two), and at the very start of --delete (so the watcher cannot restart
+# a node while it is being deleted).
+remove_watchers_for_this_folder() {
+  local name
+  for name in $(watchers_for_this_folder); do
+    echo -e "${YELLOW}Removing existing watcher container $name..${NOCOLOUR}"
+    sudo docker rm -f "$name" >/dev/null 2>&1
+  done
+}
+
+# Record the watcher's name in containernames.txt so --delete removes it along with
+# everything else this folder created. Idempotent: never lists the same name twice.
+record_watcher_name() {
+  local name="$1"
+  if [ -f "$container_names_file" ] && grep -qxF "$name" "$container_names_file"; then
+    return 0
+  fi
+  echo "$name" >> "$container_names_file"
+}
+
+# Launch the feed-driven node watcher as a Docker-supervised container. It watches
+# the dashboard feed and restarts nodes this folder started that the feed reports
+# banned or offline; it needs no cookies, only a bearer token in a file.
+#
+# SECURITY: the watcher is given this host's Docker socket, because restarting a
+# container is the entire point of it. Anything with that socket can do anything
+# Docker can, which is effectively root on the host. That is why the image is built
+# locally from a pinned base (docker/watcher.Dockerfile) rather than pulled, and
+# why it is scoped to only the nodes this folder started.
+start_watcher() {
+  local token_file="${TOKEN_FILE:-.watch_token}"
+
+  # The feed URL and token cannot be guessed; without them there is nothing to
+  # watch, so skip rather than fail the whole --start.
+  if [ -z "$WATCH_URL" ]; then
+    echo -e "${YELLOW}NODE_WATCHER is on but WATCH_URL is not set in $properties_file. Skipping the watcher.${NOCOLOUR}"
+    return 0
+  fi
+  if [ ! -f "$token_file" ]; then
+    echo -e "${YELLOW}NODE_WATCHER is on but the bearer-token file '$token_file' is missing. Skipping the watcher.${NOCOLOUR}"
+    echo -e "${YELLOW}Create it with the key from your dashboard, then run: sudo bash $script_name --watcher${NOCOLOUR}"
+    return 0
+  fi
+
+  if [[ ! $NODE_WATCHER_LOCAL_TAG ]]; then
+    NODE_WATCHER_LOCAL_TAG='eaincome/nodewatcher:local'
+  fi
+  if [[ ! $NODE_WATCHER_ARGS ]]; then
+    NODE_WATCHER_ARGS='--watch'
+  fi
+
+  build_watcher_image "$NODE_WATCHER_LOCAL_TAG"
+  remove_watchers_for_this_folder
+
+  echo -e "${YELLOW}The watcher is given this host's Docker socket, which is effectively root on the host.${NOCOLOUR}"
+  echo -e "${YELLOW}It only ever restarts nodes this folder started (nodemap.txt).${NOCOLOUR}"
+
+  # No --network none here: unlike the socket-watchdog, the watcher must reach the
+  # dashboard feed. The folder is mounted read-write so watcher.log -- which is the
+  # cooldown/cap ledger -- persists across restarts. INTERVAL, WATCH_URL and the
+  # rest are read by the watcher from the mounted properties.conf.
+  if sudo docker run -d \
+        --name "$watcher_name" \
+        --restart=always \
+        --log-driver=json-file --log-opt max-size=10m --log-opt max-file=2 \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v "$PWD:/eaincome" \
+        "$NODE_WATCHER_LOCAL_TAG" $NODE_WATCHER_ARGS >/dev/null; then
+    record_watcher_name "$watcher_name"
+    echo -e "${GREEN}Watcher container $watcher_name started ($NODE_WATCHER_ARGS).${NOCOLOUR}"
+    echo -e "${GREEN}Follow it with:${NOCOLOUR} sudo docker logs -f $watcher_name"
+  else
+    echo -e "${RED}Failed to start the watcher container.${NOCOLOUR}"
+    return 1
   fi
 }
 
@@ -597,6 +735,13 @@ if [[ "$1" == "--start" ]]; then
   # Remove Process file
   rm -f $process_id_file
 
+  # Optionally supervise the nodes just started with the feed-driven watcher.
+  # Opt-in (NODE_WATCHER=true) because it needs a bearer token to your dashboard.
+  if [ "$NODE_WATCHER" = true ]; then
+    echo -e "${GREEN}NODE_WATCHER is enabled, starting the node watcher container..${NOCOLOUR}"
+    start_watcher
+  fi
+
   SCRIPT_END_TIME=$(date +%s)
   TOTAL_TIME=$((SCRIPT_END_TIME - SCRIPT_START_TIME))
 
@@ -631,6 +776,17 @@ if [[ "$1" == "--build" ]]; then
   echo -e "${GREEN}========================================${NOCOLOUR}"
 
   exit 0
+fi
+
+# Start (or restart) the feed-driven node watcher on its own, without touching any
+# node. Useful after creating .watch_token, or to pick up a changed properties.conf.
+# Unlike --start this does not gate on NODE_WATCHER: asking for --watcher IS the
+# opt-in. It still skips cleanly if WATCH_URL or the token file is absent.
+if [[ "$1" == "--watcher" ]]; then
+  echo -e "\n\nStarting the node watcher.."
+  load_properties
+  start_watcher
+  exit $?
 fi
 
 # Rebuild nodemap.txt from the containers that are already running.
@@ -719,6 +875,11 @@ if [[ "$1" == "--delete" ]]; then
       esac
     fi
   fi
+
+  # Stop this folder's watcher first, before deleting any node, so it cannot
+  # restart a container while we are removing it. It is also listed in
+  # containernames.txt, so the loop below is simply a no-op for it once stopped.
+  remove_watchers_for_this_folder
 
   # Delete containers by container names
   if [ -f "$container_names_file" ]; then
@@ -857,4 +1018,4 @@ if [[ "$1" == "--deleteBackup" ]]; then
   exit 0
 fi
 
-echo -e "Valid options are: ${RED}--start${NOCOLOUR}, ${RED}--delete${NOCOLOUR}, ${RED}--deleteBackup${NOCOLOUR}, ${RED}--build${NOCOLOUR}, ${RED}--install${NOCOLOUR}"
+echo -e "Valid options are: ${RED}--start${NOCOLOUR}, ${RED}--delete${NOCOLOUR}, ${RED}--deleteBackup${NOCOLOUR}, ${RED}--build${NOCOLOUR}, ${RED}--watcher${NOCOLOUR}, ${RED}--nodemap${NOCOLOUR}, ${RED}--install${NOCOLOUR}"
