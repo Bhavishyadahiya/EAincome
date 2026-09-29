@@ -1,481 +1,929 @@
 # EAincome
 
-An EarnApp-focused variant of [Internet Income](https://github.com/engageub/InternetIncome) by engageub.
+<p align="center">
+  <img src="banner.jpg" alt="EAincome" width="900">
+</p>
 
-It runs EarnApp nodes in Docker, either on your direct connection or one node per
-proxy, and strips out every other app so there is less to configure and less to
-go wrong.
+<p align="center">
+  <b>EarnApp-only Docker automation with optional proxy-per-node networking.</b><br>
+  Built from the structure of <a href="https://github.com/engageub/InternetIncome">Internet Income</a>, with the non-EarnApp components removed.
+</p>
 
-## Quick start
+---
+
+## What is EAincome?
+
+EAincome is a Bash-based launcher that runs **EarnApp nodes in Docker**.
+
+It supports two operating modes:
+
+* **Direct mode:** one EarnApp container uses the host connection.
+* **Proxy mode:** one EarnApp node is created for each proxy, with a dedicated `tun2proxy` sidecar.
+
+The script handles:
+
+* Docker installation
+* EarnApp image building
+* Node UUID generation
+* Persistent node data
+* Proxy validation
+* DNS configuration
+* Container creation
+* Container cleanup
+* Container restarting
+
+> **Important:** EAincome does not bypass EarnApp service limits or guarantee earnings. Your IPs, proxies, and account must comply with EarnApp's current terms.
+
+---
+
+## Features
+
+| Feature                         | Included |
+| ------------------------------- | :------: |
+| EarnApp Docker nodes            |     ✅    |
+| One node per proxy              |     ✅    |
+| HTTP / HTTPS / SOCKS4 / SOCKS5  |     ✅    |
+| Local EarnApp image build       |     ✅    |
+| Persistent node UUIDs           |     ✅    |
+| `tun2proxy` networking          |     ✅    |
+| Configurable DNS modes          |     ✅    |
+| Docker log rotation             |     ✅    |
+| Automatic container restart     |     ✅    |
+| Native Linux certificate repair |     ✅    |
+
+---
+
+# Quick Start
+
+## 1. Clone the repository
 
 ```bash
-# Install Docker if you don't have it
-sudo bash EAincome.sh --install
+git clone https://github.com/Bhavishyadahiya/EAincome.git
+cd EAincome
+```
 
-# Edit properties.conf, then start
+Check the files:
+
+```bash
+ls -la
+```
+
+You should see:
+
+```text
+EAincome.sh
+properties.conf
+proxies.txt
+restart.sh
+docker/
+```
+
+---
+
+## 2. Install Docker
+
+EAincome can install Docker for you:
+
+```bash
+sudo bash EAincome.sh --install
+```
+
+Verify Docker:
+
+```bash
+sudo docker version
+```
+
+Check that the Docker service is running:
+
+```bash
+sudo systemctl status docker --no-pager
+```
+
+---
+
+## 3. Configure EAincome
+
+Open the configuration file:
+
+```bash
+nano properties.conf
+```
+
+### Direct connection
+
+If you want EarnApp to use the host's normal connection:
+
+```bash
+USE_PROXIES=false
+```
+
+### Proxy mode
+
+If you want one EarnApp node per proxy:
+
+```bash
+USE_PROXIES=true
+```
+
+The current repository configuration already has proxy mode enabled.
+
+---
+
+# Proxy Configuration
+
+Proxy mode requires:
+
+```text
+proxies.txt
+```
+
+Edit it:
+
+```bash
+nano proxies.txt
+```
+
+Put **one proxy per line**.
+
+### Supported formats
+
+```text
+socks5://1.2.3.4:1080
+```
+
+```text
+socks5://username:password@1.2.3.4:1080
+```
+
+```text
+http://1.2.3.4:8080
+```
+
+```text
+http://username:password@1.2.3.4:8080
+```
+
+```text
+https://1.2.3.4:8443
+```
+
+```text
+socks4://1.2.3.4:1080
+```
+
+Supported protocols:
+
+```text
+http
+https
+socks4
+socks5
+```
+
+These are also accepted and normalized automatically:
+
+```text
+socks5h://
+socks4a://
+```
+
+### Unsupported
+
+```text
+ss://
+```
+
+Shadowsocks proxies are not supported by the current `tun2proxy` setup.
+
+---
+
+## Example `proxies.txt`
+
+```text
+socks5://user:password@10.0.0.10:9001
+socks5://user:password@10.0.0.11:9002
+socks5://user:password@10.0.0.12:9003
+```
+
+With three proxies, EAincome creates a corresponding proxy tunnel and EarnApp node for each entry.
+
+---
+
+# Start EAincome
+
+The recommended command is:
+
+```bash
 sudo bash EAincome.sh --start
 ```
 
-The script prints an `https://earnapp.com/r/sdk-node-...` URL per node and writes
-them all to `earnapp.txt`. Paste each URL into your EarnApp dashboard to link the
-device.
+On the first run, EAincome will:
 
-| Command | What it does |
-| :--- | :--- |
-| `--install` | Installs Docker, plus binfmt emulation on ARM hosts |
-| `--build` | Builds the EarnApp image without starting anything |
-| `--start` | Starts one EarnApp node per proxy, or a single node on your direct connection |
-| `--watchdog` | Runs the node watchdog as a Docker-supervised container. Needs the Docker socket -- read [that section](#running-the-watchdog-as-a-container) first |
-| `--delete` | Stops and removes all containers, then cleans up stale ones |
-| `--deleteBackup` | Removes `earnapp.txt`. Do this only if you want to abandon your node UUIDs |
+1. Read `properties.conf`
+2. Validate the proxy configuration
+3. Build the local EarnApp image if enabled
+4. Pull the required `tun2proxy` image
+5. Create the proxy containers
+6. Generate EarnApp node UUIDs
+7. Create the EarnApp containers
+8. Save the node URLs
 
-`--delete` deliberately keeps `earnapp.txt`, so a stop/start cycle reuses the same
-node UUIDs and your dashboard links stay valid. It does remove the watchdog
-container, so that it cannot start nodes back up mid-deletion.
+---
 
-## The EarnApp image
+# Claim Your EarnApp Nodes
 
-By default EAincome builds its own EarnApp image from the `docker/` folder rather
-than pulling one from a registry. The build happens once, before the first node
-starts, and every node afterwards reuses that same image, so a host running twenty
-nodes runs twenty copies of one binary you built yourself.
+Generated node URLs are saved to:
 
-Building beats pulling here for three reasons. You get a certificate store that is
-as fresh as the day you built it, which is the difference between a node that links
-and one that does not. You get whatever version EarnApp currently ships rather than
-whatever version a third party last rebuilt: at the time of writing the local build
-produces 1.651.510 while `madereddy/earnapp:latest` still carries 1.607.304. And
-the contents stop changing underneath you, because nothing is being pulled from a
-tag someone else controls.
+```text
+earnapp.txt
+```
 
-The image is cached like any other, so `--start` on subsequent runs costs nothing.
-When you want to pick up a newer EarnApp release, rebuild explicitly:
+View them with:
+
+```bash
+cat earnapp.txt
+```
+
+You will see URLs similar to:
+
+```text
+https://earnapp.com/r/sdk-node-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Open each URL in your EarnApp dashboard and claim/link the corresponding node.
+
+---
+
+# Build the EarnApp Image
+
+EAincome builds its own EarnApp image by default.
+
+To build the image without starting nodes:
 
 ```bash
 sudo bash EAincome.sh --build
 ```
 
-The build also refuses to hand you a broken image. Before it installs anything it
-verifies that the certificate store it just built can actually validate the real
-BrightData and EarnApp TLS chains, and aborts if it cannot. The installer then
-performs a genuine registration as it runs, which means the `earnapp` binary's own
-TLS stack has exercised that store before the image is finished. A build that
-succeeds is a build whose nodes can link.
+The local image is:
 
-Set `BUILD_EARNAPP_IMAGE=false` if you would rather pull `EARNAPP_IMAGE`. That path
-still works, and the script compensates for the missing certificate store by
-bind-mounting your host's bundle into the container, so your host needs the
-`ca-certificates` package installed.
-
-## Troubleshooting: nodes that will not link
-
-If registration fails with
-
-```
-Failed registration: check internet connection and try again
+```text
+eaincome/earnapp:local
 ```
 
-the message is not to be taken at face value -- but it is not always a lie either.
-Two quite different faults produce that same sentence.
-
-The common one is certificates. The `earnapp` binary is a self-contained Node
-application that bundles its own TLS stack, and it does not consult the operating
-system certificate store unless `NODE_EXTRA_CA_CERTS` points at a bundle.
-Verification fails, and the binary reports that as a network problem. Installing
-`ca-certificates` on its own does not fix it. That was tested directly: an image
-with the package installed but the variable unset still failed to register, and the
-same image registered within seconds once the variable was set. The variable is the
-operative half.
-
-The other one is a real reachability failure, and it hides well because it is
-host-specific. Registration talks to `client.earnapp.com`, not `earnapp.com`. A
-machine can open `earnapp.com:443` perfectly while `client.earnapp.com:443` times
-out, which means a browser test proves nothing and any check aimed at the wrong host
-will report a green light on a node that cannot possibly link.
-
-Nodes started by EAincome are already covered, and covered in a way that does not
-depend on the variable merely being set. The build verifies the store against the
-live BrightData and EarnApp chains and fails rather than shipping an image that
-cannot register. At startup the container probes `client.earnapp.com:443` itself and
-names which of the two faults it found: a connection that will not open is reported
-as reachability, a certificate that will not verify is reported as a trust store
-problem, and success is stated plainly. If the variable is unset or points at
-nothing, it finds a usable bundle itself and says so. The prebuilt-image path sets
-the variable on the `docker run` command line alongside a bind-mounted bundle from
-your host.
-
-So if a node will not link, `docker logs <container>` names the cause instead of
-leaving you to guess between a firewall and a certificate.
-
-For a **native install** managed by systemd, run the helper:
+Check it:
 
 ```bash
-sudo bash fixEarnAppCerts.sh
+sudo docker images | grep eaincome
 ```
 
-It refreshes your certificate store, finds the bundle wherever your distribution
-keeps it, and adds the variable to `earnapp.service` through a drop-in at
-`/etc/systemd/system/earnapp.service.d/override.conf`. A drop-in is used rather than
-an edit to the unit file so that updating or reinstalling EarnApp cannot quietly
-discard the fix. Afterwards, `sudo earnapp register` and claim the node.
+Or:
 
-## Reading the logs
-
-No log viewer can help you here, and that is worth understanding before you install
-one. Portainer, `docker logs`, `docker logs -f` and everything else all read the same
-json-file stream; if the process wrote nothing, every one of them shows an empty
-pane. The only thing that changes what you see is making the process talk.
-
-By default a node reports its UUID, its EarnApp version, the certificate store in
-use, the result of the connectivity probe, and then `- Registering Device...`. That
-is enough to separate a certificate failure from an unreachable host, and it costs
-nothing.
-
-For more, set both of these in `properties.conf`:
-
-```
-ENABLE_LOGS=true
-EARNAPP_DEBUG=true
+```bash
+sudo docker image inspect eaincome/earnapp:local
 ```
 
-`EARNAPP_DEBUG` turns on Node's own debug channels (`NODE_DEBUG=tls,http` and
-`DEBUG=*`) inside the container. The registration attempt then dumps its TLS
-handshake and every HTTP request it makes, which is how you get a line like
+After building:
 
-```
-HTTP 22: SOCKET ERROR: connect ETIMEDOUT 34.237.199.147:443
-Failed registration: check internet connection and try again
+```bash
+sudo bash EAincome.sh --start
 ```
 
-where before you had only the second line. Note that `ENABLE_LOGS=true` on its own
-is what preserves the output; `EARNAPP_DEBUG=true` without it is discarded, and the
-script says so rather than letting you wonder.
+The image is cached and reused for subsequent starts.
 
-**These logs identify your account.** The dumps include request headers and your
-node UUID, which appears in the `/install_device` query string. Treat a debug log
-like a credential: do not paste it into an issue, a forum, or a chat window.
+---
 
-Turn it off again once the node links. It is a tool for diagnosing a node that will
-not register, not something to leave running.
+# Rebuild the Image
 
-What debug output will *not* give you is an ongoing feed. `earnapp run`, the phase a
-healthy node spends its life in, prints nothing at all -- not with `--verbose`, not
-with both debug variables set. Measured on a running node: zero bytes added to the
-log in 35 seconds. Only the registration phase talks, so a silent log on a linked
-node is normal and is not evidence of anything.
+If you want to force a fresh build:
 
-For the proxy half of a node, raise `TUN2PROXY_LOG_LEVEL` to `debug`, or `trace` for
-a line per relayed connection. That is the right tool for confirming whether a
-suspect node's traffic is reaching its exit, and it is unusable across dozens of
-nodes at once, so point it at one node rather than the whole fleet.
+```bash
+sudo bash EAincome.sh --build
+```
 
-One practical catch: Docker fixes a container's log driver when the container is
-created, so changing `ENABLE_LOGS`, the size limits or `EARNAPP_DEBUG` only takes
-effect on containers created afterwards. Recreate them with
+Then restart the nodes:
 
 ```bash
 sudo bash EAincome.sh --delete
 sudo bash EAincome.sh --start
 ```
 
-and before you do, make sure `proxies.txt` still holds *every* proxy you intend to
-run. Nodes are matched to proxies by line number, so starting a partial list gives
-those nodes the UUIDs belonging to other lines and you end up with several
-containers claiming the same identity.
+---
 
-## Using proxies
+# Using a Prebuilt Image
 
-Set `USE_PROXIES=true` in `properties.conf` and add one proxy per line to
-`proxies.txt`:
-
-```
-socks5://user:password@1.2.3.4:1080
-http://proxy.example.com:8080
-```
-
-Every proxy is routed through [tun2proxy](https://github.com/tun2proxy/tun2proxy),
-which supports `http`, `https`, `socks4` and `socks5`. `socks5h://` and
-`socks4a://` are normalised automatically. Shadowsocks (`ss://`) is not supported
-and is rejected with an explicit error rather than failing silently at runtime.
-Proxy syntax is validated up front, so a typo stops the run before any container
-is created.
-
-Each proxy gets its own tun2proxy container, and the matching EarnApp container
-joins that container's network namespace. EarnApp allows one device per IP, so use
-one proxy per node.
-
-### DNS
-
-`TUN2PROXY_DNS_MODE` controls how names are resolved. Leave it blank and it is
-derived from `USE_DNS_OVER_HTTPS` for backwards compatibility.
-
-- **`virtual`** (default) answers lookups locally with synthetic IPs and passes the
-  hostname to the proxy, so resolution happens at the exit node. No DNS query ever
-  leaves the container.
-- **`over-tcp`** sends DNS as TCP through the proxy. Slightly slower per lookup but
-  returns real addresses.
-- **`direct`** passes DNS through as UDP, which requires a proxy that supports UDP.
-
-`virtual` and `over-tcp` both keep DNS geo-consistent with the exit IP. Earlier
-versions of this script let DNS leave through the host's connection while traffic
-exited at the proxy, which meant CDNs were resolved near your host rather than
-near the node.
-
-## Configuration reference
-
-| Key | Default | Notes |
-| :--- | :--- | :--- |
-| `DEVICE_NAME` | `ubuntu` | Identification only |
-| `EARNAPP` | `true` | Set false to start nothing |
-| `BUILD_EARNAPP_IMAGE` | `true` | Build the image locally from `docker/` instead of pulling |
-| `EARNAPP_LOCAL_TAG` | `eaincome/earnapp:local` | Tag given to the locally built image |
-| `EARNAPP_IMAGE` | `madereddy/earnapp:latest` | Used only when `BUILD_EARNAPP_IMAGE=false`. Supports amd64 and arm64. Upstream uses `fazalfarhan01/earnapp:lite` |
-| `USE_PROXIES` | `false` | Requires `proxies.txt` |
-| `TUN2PROXY_IMAGE` | `ghcr.io/tun2proxy/tun2proxy:v0.8.3` | Pinned deliberately |
-| `TUN2PROXY_DNS_MODE` | blank | `virtual`, `over-tcp` or `direct` |
-| `USE_DNS_OVER_HTTPS` | `false` | Selects `over-tcp` when the mode above is blank |
-| `USE_SOCKS5_DNS` | `false` | **Deprecated.** Use `TUN2PROXY_DNS_MODE='direct'` |
-| `ENABLE_LOGS` | `false` | Debugging only. Costs performance |
-| `LOG_MAX_SIZE` | `10m` | Log size per container before rotation, used only when `ENABLE_LOGS=true` |
-| `LOG_MAX_FILES` | `3` | Rotated files kept per container. Worst case on disk is size x files x containers |
-| `TUN2PROXY_LOG_LEVEL` | `info` | tun2proxy verbosity. Upstream uses `trace`, which logs every relayed connection on every node |
-| `EARNAPP_DEBUG` | `false` | Turns on `NODE_DEBUG`/`DEBUG` inside the earnapp container. Needs `ENABLE_LOGS=true`. Output is account-identifying -- see [Reading the logs](#reading-the-logs) |
-| `WATCHDOG` | `false` | Start the node watchdog container at the end of `--start`. Needs the Docker socket -- see [Running the watchdog as a container](#running-the-watchdog-as-a-container) |
-| `WATCHDOG_LOCAL_TAG` | `eaincome/watchdog:local` | Tag given to the locally built watchdog image |
-| `WATCHDOG_ARGS` | `--watch --dry-run` | How the watchdog runs. Drop `--dry-run` to let it actually restart nodes |
-
-Upstream sets `max-size=100k` and leaves `max-file` at 1, which holds only two
-or three minutes of a busy node's output -- by the time you go looking, the thing
-you wanted to see has been truncated away. The defaults above hold roughly a day
-per container. The log driver is fixed when a container is created, so changing
-any of these needs `--delete` followed by `--start`.
-
-## Helper scripts
-
-`fixEarnAppCerts.sh` repairs a native, non-Docker EarnApp install that will not
-link. See the troubleshooting section above.
-
-`restart.sh` restarts every container listed in `containernames.txt`.
-
-`nodeWatchdog.sh` finds nodes that have stopped doing any work and restarts them.
-It needs no credentials, no configuration and asks you nothing -- everything it
-uses comes from Docker and from `/proc`:
+The default configuration uses a locally built image:
 
 ```bash
-bash nodeWatchdog.sh                # report only, changes nothing (the default)
-bash nodeWatchdog.sh --once         # act once, then exit
-bash nodeWatchdog.sh --once -n      # say what it would do, do nothing
-bash nodeWatchdog.sh --watch        # sample and act every INTERVAL seconds
-bash nodeWatchdog.sh --cron         # print a crontab line to paste
+BUILD_EARNAPP_IMAGE=true
 ```
 
-Because the `earnapp` binary is silent once running, the watchdog judges a node
-by what it does on the network rather than by what it says. It samples two things
-per node from inside the container's network namespace: total bytes through every
-interface except `lo`, and the number of established TCP connections to port 443.
-A healthy node moves tens of megabytes an hour in each direction and holds
-several connections at once; an idle one sits at a few bytes a second of
-keepalive. A node is only called stalled when **both** signals agree, because
-either one alone has a benign explanation -- a quiet period, or a momentary
-reconnect.
-
-It also fixes what happens after a host reboot. In proxy mode each node container
-shares its `tun2proxy` container's network namespace, and at boot Docker starts
-containers in arbitrary order, so a node that Docker tries to start before its
-tunnel is up fails with `cannot join network namespace of a non running
-container`. That is a *start* failure rather than a run failure, so `--restart
-always` never rescues it and the node stays dead until something starts it by
-hand. The watchdog starts the parent first and the node second, which is exactly
-the ordering Docker's restart policy cannot provide.
-
-Every threshold is an environment variable, so nothing in the script needs
-editing:
-
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `GRACE` | `900` | Ignore a node for this many seconds after it starts |
-| `STALL_WINDOW` | `1800` | How far back to look when measuring traffic |
-| `STALL_BYTES` | `1048576` | Less than this over the window counts as no traffic |
-| `MIN_SOCKETS` | `2` | Fewer established `:443` connections than this counts as disconnected |
-| `COOLDOWN` | `1800` | Minimum seconds between restarts of the same node |
-| `CAP` / `CAP_WINDOW` | `3` / `21600` | Give up on a node after this many restarts in this window |
-| `INTERVAL` | `60` | Seconds between samples in `--watch` |
-
-Two honest caveats. The thresholds are derived from measurements of healthy nodes
-rather than from a node caught in the act of not earning, which is why the
-default mode changes nothing and why every run appends its samples to
-`watchdog.state`: once you see a node go red in the dashboard you can look back
-at what its numbers were doing and tighten the thresholds to match. And the
-`CAP` exists because a restart is not a cure for everything -- a node that needs
-restarting three times in six hours has a problem a restart will not fix, and the
-watchdog says so in `watchdog.log` and then leaves it alone.
-
-Run it as root or as a user in the `docker` group. Nodes are found by the
-`EARNAPP_UUID` environment variable rather than by container name, so a `tun*`
-container can never be picked as a candidate -- restarting one would tear the
-network namespace out from under the node sharing it.
-
-### Running the watchdog as a container
-
-Rather than a systemd unit or a crontab entry, let Docker supervise it -- Docker
-is already the supervisor on this host:
+To use the configured registry image instead:
 
 ```bash
-sudo bash EAincome.sh --watchdog
+nano properties.conf
 ```
 
-That builds `docker/watchdog.Dockerfile` on first use, tags it
-`eaincome/watchdog:local`, and runs it with `--restart=always`, so it survives a
-reboot. Setting `WATCHDOG=true` in `properties.conf` does the same thing
-automatically at the end of `--start`. Rerunning `--watchdog` replaces this
-folder's container, which is how you apply a changed `WATCHDOG_ARGS` or threshold.
-
-It starts in `--watch --dry-run`, logging what it *would* restart and touching
-nothing. Watch it for a day, and once its verdicts match what you believe about
-your nodes, set `WATCHDOG_ARGS='--watch'` and run `--watchdog` again.
-
-A dry run is a faithful preview, not a running commentary: it applies `COOLDOWN`
-and `CAP` to its own `DRY-RUN would RESTART` lines, so a node it would restart
-produces one line every half hour rather than one every minute, and goes quiet
-after three in six hours -- exactly what a live run would have done. The two
-ledgers are kept apart, so switching to `--watch` starts from a clean slate and
-never inherits a cooldown from a restart that never happened.
+Set:
 
 ```bash
-sudo docker ps --filter name=eaincome-watchdog   # every watcher on this host
-sudo docker logs -f eaincome-watchdog-<folder>   # live, one folder's watcher
-cat watchdog.log                                 # the same findings, kept on disk
+BUILD_EARNAPP_IMAGE=false
 ```
 
-**The watchdog is given this host's Docker socket.** It has to be: restarting a
-container is the entire point of it. Anything holding that socket can do anything
-Docker can do, which on a normal host is equivalent to root. That is why the image
-is built locally from a pinned `docker:28-cli` base rather than pulled from
-someone else's registry, why the build context is limited by `.dockerignore` to
-the one script it needs (`earnapp.txt` and `proxies.txt` are never sent to the
-daemon), and why it runs with `--network none`. If that trade is not one you want
-to make, use `--cron` or run the script by hand instead; everything works the same
-way, only unsupervised.
-
-The container also needs the host's `/proc` mounted read-only at `/host/proc`. The
-PIDs it samples come from `docker inspect` and belong to the host's PID namespace,
-so they mean nothing against the container's own `/proc`. And it needs its own
-folder bind-mounted, which is how `watchdog.state` and `watchdog.log` end up on
-the host instead of vanishing with the container.
-
-### One watcher per folder
-
-Several copies of EAincome on one host each get their own watcher, and each looks
-after only its own nodes. Three things arrange that, and they overlap on purpose.
-
-**The name.** It is derived from the folder the watcher was started in
-(`eaincome-watchdog-<folder>-<checksum of the path>`), so a second `--watchdog`
-elsewhere adds a watcher rather than replacing yours. Two folders with the same
-basename under different parents still differ, because the checksum is of the full
-path.
-
-**What `--delete` removes.** The watcher's name is written into
-`containernames.txt` alongside the containers, so the same loop that removes the
-nodes removes it. `--delete` also looks up watchers by their `/eaincome` bind mount
-before it starts, which catches one whose name was never recorded -- started by
-hand, or by an older version of this script -- and which is what confines it to the
-folder you ran it in. A watcher belonging to another folder is never matched by
-either route.
-
-**What it may look at.** Scope is `containernames.txt` in the watcher's own folder,
-and within that file only names beginning with `earnapp`. EAincome names a node
-`earnapp<UNIQUE_ID><n>` and its tunnel `tun<UNIQUE_ID><n>`, so that one word keeps
-the watcher off the tunnels the file lists beside them -- and off its own container.
-`UNIQUE_ID` is fresh per `--start`, so no other folder's container can be named in
-your file in the first place. `EARNAPP_UUID` is then checked as well, because
-restarting a tun2proxy container would pull the network namespace out from under
-the node sharing it and that is worth being sure of twice.
-
-A watcher never widens its own scope. If `containernames.txt` is missing, empty, or
-names no `earnapp` container yet, it watches nothing and says so, because the
-alternative would be ugly -- `--delete` removes that file, so a watcher whose own
-folder had been emptied would otherwise adopt every other folder's nodes. The file
-is re-read every pass, so a watcher started before `--start` sits idle and picks up
-its nodes as soon as they exist. Only `SCOPE_FILE=` (explicitly empty) watches every
-node on the host.
-
-Starting the watchdog before `--start` therefore leaves a `containernames.txt` that
-holds nothing but the watcher's name. `--start` recognises that for what it is and
-carries on, appending the batch to it, rather than refusing on the grounds that a
-previous deployment is still running.
-
-Finally, `--delete` removes the watchdog container before it stops anything else,
-on purpose. A deletion looks exactly like an outage from the watchdog's point of
-view, so a watcher left running would start nodes back up halfway through being
-deleted. Bring it back with `--watchdog` after the next `--start`.
-
-All folders share one image, since the script inside it is the same. After editing
-`nodeWatchdog.sh`, rebuild once and restart each watcher:
+and:
 
 ```bash
-sudo docker build --pull -f docker/watchdog.Dockerfile -t eaincome/watchdog:local .
-sudo bash EAincome.sh --watchdog    # in each folder
+EARNAPP_IMAGE='madereddy/earnapp:latest'
 ```
 
-`earnappStatus.sh` is the optional counterpart: it asks the EarnApp dashboard
-what it thinks of your nodes and prints one row per node, mapping each node ID
-back to the container running it. It is the only way to see the dashboard's own
-verdict from the command line, but unlike the watchdog it needs a session cookie,
-so it is a diagnostic tool rather than something to automate.
-
-To use it, sign in at
-<https://earnapp.com/dashboard>, open developer tools, find the
-`oauth-refresh-token` cookie for `earnapp.com`, and save it:
+Then:
 
 ```bash
-umask 077; printf '%s' 'PASTE_THE_COOKIE_VALUE' > ~/.earnapp_token
-bash earnappStatus.sh
+sudo bash EAincome.sh --start
 ```
 
-That cookie is equivalent to being signed in to your account. It is gitignored,
-the script only ever reads it from a file, and it is passed to curl through a
-private config file so it never appears in `ps` output. Never paste it into a
-chat or a terminal argument.
+When using a prebuilt image, EAincome searches for the host's CA certificate bundle and passes it into the container using:
 
-The script only reads; it restarts nothing. It exits 0 when every node is
-earning and 1 when at least one is not, so it also works as a cron check. Use
-`--shape` if the output ever stops making sense -- the dashboard API is
-undocumented and has changed before, and `--shape` prints the structure with all
-values redacted, which is safe to share.
+```text
+NODE_EXTRA_CA_CERTS
+```
 
-`updateProxies.sh` is a leftover that hot-swapped the proxy address inside
-`xjasonlyu/tun2socks` containers. tun2proxy takes its proxy as a command-line
-argument, so it cannot be swapped in place. The script now exits with an
-explanation instead of silently doing nothing. To change proxies, edit
-`proxies.txt` and run `--delete` followed by `--start`; your node UUIDs survive.
+For the most controlled setup, the local build is the default.
 
-## Differences from upstream Internet Income
+---
 
-Only EarnApp is supported, so there is no Mysterium, browser-based app, or
-extension-based app handling, and no `firefoxprofiledata.zip` /
-`chromeprofiledata.zip` to download.
+# Configuration Reference
 
-Upstream picks between three proxy backends (`hev-socks5-tunnel`, `tun2proxy` and
-`xjasonlyu/tun2socks`) depending on your DNS settings and proxy protocol.
-EAincome uses tun2proxy for everything, which is why `USE_SOCKS5_DNS` is
-deprecated and `ss://` is unsupported.
+Edit:
 
-`EARNAPP_IMAGE` and `TUN2PROXY_IMAGE` are configurable here but hardcoded upstream.
+```bash
+nano properties.conf
+```
 
-Upstream pulls a prebuilt EarnApp image. EAincome builds its own by default, which
-is what makes `NODE_EXTRA_CA_CERTS` possible to guarantee rather than hope for.
-The image also seeds a bind-mounted `/etc/earnapp` from a build-time template,
-supervises the binary with exponential backoff, and reports an unregistered node as
-unhealthy to `docker ps` instead of sitting there looking fine.
+## General
 
-## Notes
+| Variable              | Default                    | Description                                    |
+| --------------------- | -------------------------- | ---------------------------------------------- |
+| `DEVICE_NAME`         | `ubuntu`                   | Device identification value                    |
+| `EARNAPP`             | `true`                     | Enable EarnApp startup                         |
+| `BUILD_EARNAPP_IMAGE` | `true`                     | Build the EarnApp image locally                |
+| `EARNAPP_LOCAL_TAG`   | `eaincome/earnapp:local`   | Local Docker image tag                         |
+| `EARNAPP_IMAGE`       | `madereddy/earnapp:latest` | Prebuilt image when local building is disabled |
 
-Run one node per IP. Residential and home ISP IPs are what EarnApp pays for;
-datacenter and VPS IPs are generally not accepted.
+## Networking
 
-## Disclaimer
+| Variable             | Description                     |
+| -------------------- | ------------------------------- |
+| `USE_PROXIES`        | Enable proxy-per-node mode      |
+| `TUN2PROXY_IMAGE`    | tun2proxy Docker image          |
+| `TUN2PROXY_DNS_MODE` | DNS mode                        |
+| `USE_DNS_OVER_HTTPS` | Legacy DNS selector             |
+| `USE_SOCKS5_DNS`     | Deprecated compatibility option |
 
-Provided as is, without warranty of any kind. You are responsible for complying
-with EarnApp's terms of service and with the terms of any proxy provider you use.
+## Logging
 
-Licensed under the terms in [LICENSE](LICENSE).
+| Variable              | Default | Description                 |
+| --------------------- | ------- | --------------------------- |
+| `ENABLE_LOGS`         | `false` | Enable Docker JSON logs     |
+| `LOG_MAX_SIZE`        | `10m`   | Maximum size per log file   |
+| `LOG_MAX_FILES`       | `3`     | Number of rotated log files |
+| `TUN2PROXY_LOG_LEVEL` | `info`  | tun2proxy log verbosity     |
+
+---
+
+# Current Recommended Proxy Settings
+
+For proxy mode:
+
+```bash
+USE_PROXIES=true
+TUN2PROXY_DNS_MODE=over-tcp
+ENABLE_LOGS=false
+```
+
+The current repository's `properties.conf` already uses proxy mode with:
+
+```bash
+USE_PROXIES=true
+```
+
+and:
+
+```bash
+TUN2PROXY_DNS_MODE=over-tcp
+```
+
+---
+
+# DNS Modes
+
+EAincome supports three `tun2proxy` DNS modes.
+
+## `virtual`
+
+```bash
+TUN2PROXY_DNS_MODE=virtual
+```
+
+Uses tun2proxy's virtual DNS handling.
+
+---
+
+## `over-tcp`
+
+```bash
+TUN2PROXY_DNS_MODE=over-tcp
+```
+
+Sends DNS over TCP through the proxy.
+
+This is the mode currently configured in the repository.
+
+---
+
+## `direct`
+
+```bash
+TUN2PROXY_DNS_MODE=direct
+```
+
+Uses UDP DNS.
+
+The proxy must support UDP for this mode.
+
+---
+
+# Docker Commands
+
+## List running containers
+
+```bash
+sudo docker ps
+```
+
+## List all containers
+
+```bash
+sudo docker ps -a
+```
+
+## Show EAincome containers
+
+```bash
+sudo docker ps -a --format '{{.Names}}\t{{.Status}}\t{{.Image}}' | grep -E 'earnapp|tun'
+```
+
+## Inspect a container
+
+```bash
+sudo docker inspect <container_name>
+```
+
+## View logs
+
+```bash
+sudo docker logs <container_name>
+```
+
+## Follow logs live
+
+```bash
+sudo docker logs -f <container_name>
+```
+
+---
+
+# Enable Logs
+
+By default:
+
+```bash
+ENABLE_LOGS=false
+```
+
+This avoids unnecessary Docker log overhead.
+
+For debugging:
+
+```bash
+nano properties.conf
+```
+
+Set:
+
+```bash
+ENABLE_LOGS=true
+```
+
+Then recreate the containers:
+
+```bash
+sudo bash EAincome.sh --delete
+sudo bash EAincome.sh --start
+```
+
+View logs:
+
+```bash
+sudo docker logs -f <container_name>
+```
+
+---
+
+# Restart Containers
+
+EAincome stores container names in:
+
+```text
+containernames.txt
+```
+
+Restart all tracked containers:
+
+```bash
+bash restart.sh
+```
+
+Or:
+
+```bash
+sudo bash restart.sh
+```
+
+---
+
+# Stop and Remove Containers
+
+Run:
+
+```bash
+sudo bash EAincome.sh --delete
+```
+
+This removes the containers and networks created by EAincome and cleans its runtime files.
+
+### Node UUIDs are preserved
+
+`earnapp.txt` is intentionally preserved.
+
+Therefore you can safely do:
+
+```bash
+sudo bash EAincome.sh --delete
+sudo bash EAincome.sh --start
+```
+
+without intentionally deleting the saved node URLs.
+
+---
+
+# Delete Saved Node UUIDs
+
+If you intentionally want to remove the saved node UUIDs:
+
+```bash
+sudo bash EAincome.sh --deleteBackup
+```
+
+This removes:
+
+```text
+earnapp.txt
+```
+
+The next newly created node will receive a new UUID.
+
+> Only use `--deleteBackup` if you actually want to discard the saved node links.
+
+---
+
+# Complete Command Reference
+
+| Command                                | What it does                                        |
+| -------------------------------------- | --------------------------------------------------- |
+| `sudo bash EAincome.sh --install`      | Installs Docker / required components               |
+| `sudo bash EAincome.sh --build`        | Builds the local EarnApp image                      |
+| `sudo bash EAincome.sh --start`        | Starts EarnApp nodes                                |
+| `sudo bash EAincome.sh --delete`       | Stops/removes EAincome containers and runtime state |
+| `sudo bash EAincome.sh --deleteBackup` | Removes saved node UUIDs                            |
+| `bash restart.sh`                      | Restarts tracked containers                         |
+
+---
+
+# Changing Proxies
+
+Edit:
+
+```bash
+nano proxies.txt
+```
+
+After changing the proxy list, recreate the containers:
+
+```bash
+sudo bash EAincome.sh --delete
+sudo bash EAincome.sh --start
+```
+
+Changing `proxies.txt` does **not** modify an already-created `tun2proxy` container.
+
+---
+
+# Troubleshooting
+
+## `Failed registration: check internet connection and try again`
+
+This error does not necessarily mean your internet connection is broken.
+
+The EarnApp runtime can fail TLS certificate verification and report the problem as a connectivity error.
+
+Check the container:
+
+```bash
+sudo docker logs <earnapp-container>
+```
+
+Look for:
+
+```text
+TLS trust store:
+```
+
+and:
+
+```text
+TLS check passed:
+```
+
+or:
+
+```text
+TLS check FAILED:
+```
+
+EAincome's locally built image sets:
+
+```text
+NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
+```
+
+The entrypoint also checks for a usable certificate bundle when the container starts.
+
+---
+
+# Native EarnApp Certificate Fix
+
+`fixEarnAppCerts.sh` is intended for a **native Linux EarnApp installation**, not the EAincome Docker containers.
+
+Run:
+
+```bash
+sudo bash fixEarnAppCerts.sh
+```
+
+The script refreshes the certificate store and creates a systemd drop-in containing:
+
+```text
+NODE_EXTRA_CA_CERTS
+```
+
+Afterward:
+
+```bash
+sudo earnapp register
+```
+
+Then:
+
+```bash
+sudo earnapp status
+```
+
+---
+
+# Check Saved Nodes
+
+Display all generated node links:
+
+```bash
+cat earnapp.txt
+```
+
+Count them:
+
+```bash
+grep -c 'https://earnapp.com/r/' earnapp.txt
+```
+
+---
+
+# Check Docker Images
+
+List images:
+
+```bash
+sudo docker images
+```
+
+Check the EAincome image:
+
+```bash
+sudo docker image inspect eaincome/earnapp:local
+```
+
+Check tun2proxy:
+
+```bash
+sudo docker image inspect ghcr.io/tun2proxy/tun2proxy:v0.8.3
+```
+
+---
+
+# Clean Start
+
+To remove the existing containers while keeping saved node UUIDs:
+
+```bash
+sudo bash EAincome.sh --delete
+sudo bash EAincome.sh --start
+```
+
+To completely reset the containers **and** remove saved node UUIDs:
+
+```bash
+sudo bash EAincome.sh --delete
+sudo bash EAincome.sh --deleteBackup
+sudo bash EAincome.sh --start
+```
+
+---
+
+# File Structure
+
+```text
+EAincome/
+├── EAincome.sh
+├── fixEarnAppCerts.sh
+├── restart.sh
+├── properties.conf
+├── proxies.txt
+├── banner.jpg
+├── LICENSE
+├── README.md
+└── docker/
+    ├── Dockerfile
+    └── entrypoint.sh
+```
+
+---
+
+# Runtime Files
+
+EAincome creates additional files/directories while running:
+
+```text
+earnapp.txt
+earnappdata/
+containernames.txt
+networks.txt
+resolv.conf
+process.pid
+```
+
+These are runtime files and should not normally be committed to Git.
+
+---
+
+# How It Works
+
+```text
+                         EAincome.sh
+                             │
+                 ┌───────────┴───────────┐
+                 │                       │
+           Direct mode              Proxy mode
+                 │                       │
+            EarnApp #1          ┌────────┴────────┐
+                                │                 │
+                           tun2proxy #1      tun2proxy #2
+                                │                 │
+                           EarnApp #1        EarnApp #2
+```
+
+In proxy mode:
+
+```text
+Proxy
+  │
+  ▼
+tun2proxy
+  │
+  ▼
+EarnApp
+```
+
+Each EarnApp container shares the network namespace of its matching `tun2proxy` container.
+
+This keeps the proxy path associated with its corresponding EarnApp node.
+
+---
+
+# Docker Image
+
+The repository contains its own Docker build:
+
+```text
+docker/Dockerfile
+docker/entrypoint.sh
+```
+
+The image is built from Debian and installs EarnApp during the Docker build.
+
+The image includes a CA certificate store and configures:
+
+```text
+NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
+```
+
+The entrypoint then:
+
+1. Initializes `/etc/earnapp`
+2. Writes the supplied node UUID
+3. Checks the certificate store
+4. Performs a TLS check
+5. Starts EarnApp
+6. Restarts it if it exits
+7. Uses exponential backoff when the process repeatedly exits
+
+---
+
+# Security
+
+Do **not** commit account credentials or proxy credentials.
+
+The repository ignores sensitive runtime files such as:
+
+```text
+earnapp.txt
+proxies.txt
+.earnapp_token
+```
+
+Keep these private.
+
+Never paste your EarnApp dashboard/session cookie into:
+
+* GitHub issues
+* GitHub commits
+* Screenshots
+* Public logs
+* Discord
+* Chat
+* Public documentation
+
+---
+
+# Requirements
+
+You need:
+
+* Linux
+* Bash
+* `sudo`
+* Docker
+* Internet connectivity
+* CA certificates
+* Supported proxies when proxy mode is enabled
+
+For proxy mode, make sure your proxy provider permits the traffic and supports the protocol you are using.
+
+---
+
+# Credits
+
+EAincome is an EarnApp-focused variant based on the structure and ideas of:
+
+* [Internet Income](https://github.com/engageub/InternetIncome) by **engageub**
+* [tun2proxy](https://github.com/tun2proxy/tun2proxy)
+
+EarnApp is a separate service and is not owned or operated by this repository.
+
+---
+
+# Disclaimer
+
+This project is provided **as is**, without warranty.
+
+You are responsible for:
+
+* complying with EarnApp's terms and policies,
+* complying with your proxy provider's terms,
+* securing your credentials,
+* ensuring your IPs/proxies are permitted for your use,
+* complying with applicable laws and network policies.
+
+---
+
+# License
+
+See [LICENSE](LICENSE).
