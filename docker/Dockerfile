@@ -46,6 +46,7 @@ RUN apt-get update \
         openssl \
         wget \
         hostname \
+        iproute2
     # --fresh rebuilds the bundle from the shipped certificates instead of
     # amending whatever happened to be there already.
     && update-ca-certificates --fresh \
