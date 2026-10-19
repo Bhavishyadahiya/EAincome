@@ -1,8 +1,8 @@
 # EAincome
 
-An EarnApp-focused variant of [Internet Income](https://github.com/engageub/InternetIncome) by engageub.
+An EA-focused variant of [Internet Income](https://github.com/engageub/InternetIncome) by engageub.
 
-It runs EarnApp nodes in Docker, either on your direct connection or one node per
+It runs EA nodes in Docker, either on your direct connection or one node per
 proxy, and strips out every other app so there is less to configure and less to
 go wrong.
 
@@ -23,15 +23,15 @@ device.
 | Command | What it does |
 | :--- | :--- |
 | `--install` | Installs Docker, plus binfmt emulation on ARM hosts |
-| `--build` | Builds the EarnApp image without starting anything |
-| `--start` | Starts one EarnApp node per proxy, or a single node on your direct connection |
+| `--build` | Builds the EA image without starting anything |
+| `--start` | Starts one EA node per proxy, or a single node on your direct connection |
 | `--delete` | Stops and removes all containers, then cleans up stale ones |
 | `--deleteBackup` | Removes `earnapp.txt`. Do this only if you want to abandon your node UUIDs |
 
 `--delete` deliberately keeps `earnapp.txt`, so a stop/start cycle reuses the same
 node UUIDs and your dashboard links stay valid.
 
-## The EarnApp image
+## The EA image
 
 By default EAincome builds its own EarnApp image from the `docker/` folder rather
 than pulling one from a registry. The build happens once, before the first node
