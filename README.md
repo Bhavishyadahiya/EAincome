@@ -155,7 +155,10 @@ near the node.
 | `EARNAPP_LOCAL_TAG` | `eaincome/earnapp:local` | Tag given to the locally built image |
 | `EARNAPP_IMAGE` | `madereddy/earnapp:latest` | Used only when `BUILD_EARNAPP_IMAGE=false`. Supports amd64 and arm64. Upstream uses `fazalfarhan01/earnapp:lite` |
 | `USE_PROXIES` | `false` | Requires `proxies.txt` |
-| `TUN2PROXY_IMAGE` | `ghcr.io/tun2proxy/tun2proxy:v0.8.3` | Pinned deliberately |
+| `TUN2PROXY_IMAGE` | `ghcr.io/tun2proxy/tun2proxy:v0.8.5` | Upstream binary used to build the local Alpine tunnel image |
+| `TUN2PROXY_LOCAL_IMAGE` | `eaincome/tun2proxy:local` | Locally built tunnel image with in-container traffic shaping |
+| `MAX_BANDWIDTH_MBPS` | `100` | Integer Mbps per proxy tunnel and direction; set `0` for unlimited. Direct connections are not limited |
+| `BANDWIDTH_LIMIT_DIRECTION` | `both` | Limit tunnel `upload`, `download`, or `both` |
 | `TUN2PROXY_DNS_MODE` | blank | `virtual`, `over-tcp` or `direct` |
 | `USE_DNS_OVER_HTTPS` | `false` | Selects `over-tcp` when the mode above is blank |
 | `USE_SOCKS5_DNS` | `false` | **Deprecated.** Use `TUN2PROXY_DNS_MODE='direct'` |

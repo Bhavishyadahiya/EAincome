@@ -58,6 +58,7 @@ docker_entrypoint_path="$docker_folder/entrypoint.sh"
 # whole folder as its build context and only COPYs that one file into the image.
 node_watcher_script="nodeWatcher.sh"
 watcher_dockerfile_path="$docker_folder/watcher.Dockerfile"
+tun2proxy_dockerfile_path="$docker_folder/tun2proxy.Dockerfile"
 # One watcher per folder, named after the folder so a rerun finds and replaces its
 # own. Scope is enforced by the /eaincome bind mount, not this name (see
 # watchers_for_this_folder), so a name collision across folders is still safe.
@@ -66,6 +67,13 @@ watcher_name="eaincome-watcher-$(printf '%s' "${PWD##*/}" | LC_ALL=C tr -c 'a-zA
 # Set by resolve_earnapp_image
 earnapp_image_is_local=false
 earnapp_ca_params=""
+
+ensure_tun2proxy_image() {
+  local image="${TUN2PROXY_LOCAL_IMAGE:-eaincome/tun2proxy:local}"
+  echo -e "${YELLOW}Building tun2proxy with the configured bandwidth limit..${NOCOLOUR}"
+  sudo docker build --build-arg "TUN2PROXY_BASE_IMAGE=$TUN2PROXY_IMAGE" \
+    -f "$tun2proxy_dockerfile_path" -t "$image" "$PWD"
+}
 
 #Unique Id
 UNIQUE_ID=`cat /dev/urandom | LC_ALL=C tr -dc 'a-f0-9' | dd bs=1 count=32 2>/dev/null`
@@ -527,17 +535,18 @@ start_containers() {
 
     echo -e "${YELLOW}Starting Proxy container..${NOCOLOUR}"
     if [ "$container_pulled" = false ]; then
-      sudo docker pull "$TUN2PROXY_IMAGE"
+      ensure_tun2proxy_image || { echo -e "${RED}Failed to build tun2proxy. Exiting..${NOCOLOUR}"; exit 1; }
     fi
 
     check_container_exists tun$UNIQUE_ID$i
-    if CONTAINER_ID=$(sudo docker run --name tun$UNIQUE_ID$i $LOGS_PARAM --restart=always --mount type=bind,source=/dev/net/tun,target=/dev/net/tun --sysctl net.ipv6.conf.all.disable_ipv6=1 --sysctl net.ipv6.conf.default.disable_ipv6=1 --cap-add=NET_ADMIN -d "$TUN2PROXY_IMAGE" --dns "$TUN2PROXY_DNS_MODE" --proxy "$proxy" --verbosity "$TUN_LOG_PARAM"); then
+    if CONTAINER_ID=$(sudo docker run --name tun$UNIQUE_ID$i $LOGS_PARAM --restart=always --mount type=bind,source=/dev/net/tun,target=/dev/net/tun --sysctl net.ipv6.conf.all.disable_ipv6=1 --sysctl net.ipv6.conf.default.disable_ipv6=1 --cap-add=NET_ADMIN -e MAX_BANDWIDTH_MBPS="$MAX_BANDWIDTH_MBPS" -e BANDWIDTH_LIMIT_DIRECTION="$BANDWIDTH_LIMIT_DIRECTION" -d "${TUN2PROXY_LOCAL_IMAGE:-eaincome/tun2proxy:local}" --tun tun0 --dns "$TUN2PROXY_DNS_MODE" --proxy "$proxy" --verbosity "$TUN_LOG_PARAM"); then
       echo -e "${GREEN}Container tun$UNIQUE_ID$i started successfully.${NOCOLOUR}"
     else
       echo -e "${RED}Failed to start container for proxy. Exiting..${NOCOLOUR}"
       exit 1
     fi
     sleep 1
+
   fi
 
   # Starting Earnapp container
@@ -682,6 +691,24 @@ if [[ "$1" == "--start" ]]; then
   # Default images when not configured in properties.conf
   if [[ ! $TUN2PROXY_IMAGE ]]; then
     TUN2PROXY_IMAGE='ghcr.io/tun2proxy/tun2proxy:v0.8.3'
+  fi
+
+  if [[ -z "$MAX_BANDWIDTH_MBPS" ]]; then
+    MAX_BANDWIDTH_MBPS=0
+  fi
+  if [[ ! "$MAX_BANDWIDTH_MBPS" =~ ^[0-9]+$ ]]; then
+    echo -e "${RED}MAX_BANDWIDTH_MBPS must be a non-negative integer (0 means unlimited). Exiting..${NOCOLOUR}"
+    exit 1
+  fi
+  if [[ -z "$BANDWIDTH_LIMIT_DIRECTION" ]]; then
+    BANDWIDTH_LIMIT_DIRECTION=both
+  fi
+  if [[ "$BANDWIDTH_LIMIT_DIRECTION" != upload && "$BANDWIDTH_LIMIT_DIRECTION" != download && "$BANDWIDTH_LIMIT_DIRECTION" != both ]]; then
+    echo -e "${RED}BANDWIDTH_LIMIT_DIRECTION must be upload, download, or both. Exiting..${NOCOLOUR}"
+    exit 1
+  fi
+  if [[ "$USE_PROXIES" != true && "$MAX_BANDWIDTH_MBPS" != 0 ]]; then
+    echo -e "${YELLOW}MAX_BANDWIDTH_MBPS applies to proxy tunnels. Direct connections do not use a tunnel.${NOCOLOUR}"
   fi
 
   if [[ ! $EARNAPP_IMAGE ]]; then
