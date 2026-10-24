@@ -539,7 +539,7 @@ start_containers() {
     fi
 
     check_container_exists tun$UNIQUE_ID$i
-    if CONTAINER_ID=$(sudo docker run --name tun$UNIQUE_ID$i $LOGS_PARAM --restart=always --mount type=bind,source=/dev/net/tun,target=/dev/net/tun --sysctl net.ipv6.conf.all.disable_ipv6=1 --sysctl net.ipv6.conf.default.disable_ipv6=1 --cap-add=NET_ADMIN -e MAX_BANDWIDTH_MBPS="$MAX_BANDWIDTH_MBPS" -e BANDWIDTH_LIMIT_DIRECTION="$BANDWIDTH_LIMIT_DIRECTION" -d "${TUN2PROXY_LOCAL_IMAGE:-eaincome/tun2proxy:local}" --tun tun0 --dns "$TUN2PROXY_DNS_MODE" --proxy "$proxy" --verbosity "$TUN_LOG_PARAM"); then
+    if CONTAINER_ID=$(sudo docker run --name tun$UNIQUE_ID$i $LOGS_PARAM --restart=always --mount type=bind,source=/dev/net/tun,target=/dev/net/tun --sysctl net.ipv6.conf.all.disable_ipv6=1 --sysctl net.ipv6.conf.default.disable_ipv6=1 --cap-add=NET_ADMIN -e MAX_BANDWIDTH_MBPS="$MAX_BANDWIDTH_MBPS" -e BANDWIDTH_LIMIT_DIRECTION="$BANDWIDTH_LIMIT_DIRECTION" -e BANDWIDTH_LIMIT_DELAY_SECONDS="$BANDWIDTH_LIMIT_DELAY_SECONDS" -d "${TUN2PROXY_LOCAL_IMAGE:-eaincome/tun2proxy:local}" --tun tun0 --dns "$TUN2PROXY_DNS_MODE" --proxy "$proxy" --verbosity "$TUN_LOG_PARAM"); then
       echo -e "${GREEN}Container tun$UNIQUE_ID$i started successfully.${NOCOLOUR}"
     else
       echo -e "${RED}Failed to start container for proxy. Exiting..${NOCOLOUR}"
@@ -698,6 +698,13 @@ if [[ "$1" == "--start" ]]; then
   fi
   if [[ ! "$MAX_BANDWIDTH_MBPS" =~ ^[0-9]+$ ]]; then
     echo -e "${RED}MAX_BANDWIDTH_MBPS must be a non-negative integer (0 means unlimited). Exiting..${NOCOLOUR}"
+    exit 1
+  fi
+  if [[ -z "$BANDWIDTH_LIMIT_DELAY_SECONDS" ]]; then
+    BANDWIDTH_LIMIT_DELAY_SECONDS=300
+  fi
+  if [[ ! "$BANDWIDTH_LIMIT_DELAY_SECONDS" =~ ^[0-9]+$ ]]; then
+    echo -e "${RED}BANDWIDTH_LIMIT_DELAY_SECONDS must be a non-negative integer. Exiting..${NOCOLOUR}"
     exit 1
   fi
   if [[ -z "$BANDWIDTH_LIMIT_DIRECTION" ]]; then

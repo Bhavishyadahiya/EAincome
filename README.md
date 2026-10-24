@@ -158,6 +158,7 @@ near the node.
 | `TUN2PROXY_IMAGE` | `ghcr.io/tun2proxy/tun2proxy:v0.8.5` | Upstream binary used to build the local Alpine tunnel image |
 | `TUN2PROXY_LOCAL_IMAGE` | `eaincome/tun2proxy:local` | Locally built tunnel image with in-container traffic shaping |
 | `MAX_BANDWIDTH_MBPS` | `100` | Integer Mbps per proxy tunnel and direction; set `0` for unlimited. Direct connections are not limited |
+| `BANDWIDTH_LIMIT_DELAY_SECONDS` | `300` | Seconds from tunnel startup before applying the cap, allowing EarnApp's startup speed test to run. Set `0` to apply immediately |
 | `BANDWIDTH_LIMIT_DIRECTION` | `both` | Limit tunnel `upload`, `download`, or `both` |
 | `TUN2PROXY_DNS_MODE` | blank | `virtual`, `over-tcp` or `direct` |
 | `USE_DNS_OVER_HTTPS` | `false` | Selects `over-tcp` when the mode above is blank |

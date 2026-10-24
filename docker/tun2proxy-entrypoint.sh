@@ -3,6 +3,7 @@ set -eu
 
 rate="${MAX_BANDWIDTH_MBPS:-0}"
 direction="${BANDWIDTH_LIMIT_DIRECTION:-both}"
+delay="${BANDWIDTH_LIMIT_DELAY_SECONDS:-300}"
 device="tun0"
 
 case "$rate" in
@@ -11,6 +12,9 @@ esac
 case "$direction" in
   upload|download|both) ;;
   *) echo "BANDWIDTH_LIMIT_DIRECTION must be upload, download, or both" >&2; exit 2 ;;
+esac
+case "$delay" in
+  ''|*[!0-9]*) echo "BANDWIDTH_LIMIT_DELAY_SECONDS must be a non-negative integer" >&2; exit 2 ;;
 esac
 
 apply_tunnel_limits() {
@@ -37,6 +41,11 @@ apply_tunnel_limits() {
 }
 
 limit_tunnel() {
+  if [ "$delay" -gt 0 ]; then
+    echo "Waiting ${delay}s before applying the tunnel bandwidth limit"
+    sleep "$delay"
+  fi
+
   while ! ip link show dev "$device" >/dev/null 2>&1; do
     sleep 1
   done
