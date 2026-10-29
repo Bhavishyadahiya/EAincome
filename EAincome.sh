@@ -351,6 +351,21 @@ start_containers() {
   local i=$1
   local proxy=$2
   local DNS_VOLUME="--mount type=bind,source=$PWD/$dns_resolver_file,target=/etc/resolv.conf,readonly"
+  local tun_resource_args=()
+  local earnapp_resource_args=()
+
+  if (( TUN2PROXY_MEMORY_LIMIT_MB > 0 )); then
+    tun_resource_args+=(--memory="${TUN2PROXY_MEMORY_LIMIT_MB}m")
+  fi
+  if awk -v limit="$TUN2PROXY_CPU_LIMIT" 'BEGIN { exit !(limit > 0) }'; then
+    tun_resource_args+=(--cpus="$TUN2PROXY_CPU_LIMIT")
+  fi
+  if (( EARNAPP_MEMORY_LIMIT_MB > 0 )); then
+    earnapp_resource_args+=(--memory="${EARNAPP_MEMORY_LIMIT_MB}m")
+  fi
+  if awk -v limit="$EARNAPP_CPU_LIMIT" 'BEGIN { exit !(limit > 0) }'; then
+    earnapp_resource_args+=(--cpus="$EARNAPP_CPU_LIMIT")
+  fi
 
   if [ "$container_pulled" = false ]; then
     # For users with Docker-in-Docker, the PWD path is on the host where Docker is installed.
@@ -392,7 +407,7 @@ start_containers() {
     fi
 
     check_container_exists tun$UNIQUE_ID$i
-    if CONTAINER_ID=$(sudo docker run --name tun$UNIQUE_ID$i $LOGS_PARAM --restart=always --mount type=bind,source=/dev/net/tun,target=/dev/net/tun --sysctl net.ipv6.conf.all.disable_ipv6=1 --sysctl net.ipv6.conf.default.disable_ipv6=1 --cap-add=NET_ADMIN -d "$TUN2PROXY_IMAGE" --dns "$TUN2PROXY_DNS_MODE" --proxy "$proxy" --verbosity "$TUN_LOG_PARAM"); then
+    if CONTAINER_ID=$(sudo docker run --name tun$UNIQUE_ID$i $LOGS_PARAM "${tun_resource_args[@]}" --restart=always --mount type=bind,source=/dev/net/tun,target=/dev/net/tun --sysctl net.ipv6.conf.all.disable_ipv6=1 --sysctl net.ipv6.conf.default.disable_ipv6=1 --cap-add=NET_ADMIN -d "$TUN2PROXY_IMAGE" --dns "$TUN2PROXY_DNS_MODE" --proxy "$proxy" --verbosity "$TUN_LOG_PARAM" --max-sessions "$TUN2PROXY_MAX_SESSIONS"); then
       echo -e "${GREEN}Container tun$UNIQUE_ID$i started successfully.${NOCOLOUR}"
     else
       echo -e "${RED}Failed to start container for proxy. Exiting..${NOCOLOUR}"
@@ -442,7 +457,7 @@ start_containers() {
     fi
 
     check_container_exists earnapp$UNIQUE_ID$i
-    if CONTAINER_ID=$(sudo docker run -d --health-interval=24h --name earnapp$UNIQUE_ID$i $LOGS_PARAM $DNS_VOLUME --restart=always $NETWORK_TUN --mount type=bind,source=$PWD/$earnapp_data_folder/data$i,target=/etc/earnapp $earnapp_ca_params -e EARNAPP_UUID=$uuid "$EARNAPP_IMAGE"); then
+    if CONTAINER_ID=$(sudo docker run -d --health-interval=24h --name earnapp$UNIQUE_ID$i $LOGS_PARAM "${earnapp_resource_args[@]}" $DNS_VOLUME --restart=always $NETWORK_TUN --mount type=bind,source=$PWD/$earnapp_data_folder/data$i,target=/etc/earnapp $earnapp_ca_params -e EARNAPP_UUID=$uuid "$EARNAPP_IMAGE"); then
       echo -e "${GREEN}Container earnapp$UNIQUE_ID$i started successfully.${NOCOLOUR}"
     else
       echo -e "${RED}Failed to start container for Earnapp. Exiting..${NOCOLOUR}"
@@ -534,6 +549,32 @@ if [[ "$1" == "--start" ]]; then
   # Default images when not configured in properties.conf
   if [[ ! $TUN2PROXY_IMAGE ]]; then
     TUN2PROXY_IMAGE='ghcr.io/tun2proxy/tun2proxy:v0.8.3'
+  fi
+
+  if [[ -z "$EARNAPP_MEMORY_LIMIT_MB" ]]; then EARNAPP_MEMORY_LIMIT_MB=100; fi
+  if [[ -z "$TUN2PROXY_MEMORY_LIMIT_MB" ]]; then TUN2PROXY_MEMORY_LIMIT_MB=25; fi
+  if [[ ! "$EARNAPP_MEMORY_LIMIT_MB" =~ ^(0|[1-9][0-9]*)$ ]] || { (( EARNAPP_MEMORY_LIMIT_MB > 0 && EARNAPP_MEMORY_LIMIT_MB < 6 )); }; then
+    echo -e "${RED}EARNAPP_MEMORY_LIMIT_MB must be 0 (unlimited) or an integer of at least 6 MiB. Exiting..${NOCOLOUR}"
+    exit 1
+  fi
+  if [[ ! "$TUN2PROXY_MEMORY_LIMIT_MB" =~ ^(0|[1-9][0-9]*)$ ]] || { (( TUN2PROXY_MEMORY_LIMIT_MB > 0 && TUN2PROXY_MEMORY_LIMIT_MB < 6 )); }; then
+    echo -e "${RED}TUN2PROXY_MEMORY_LIMIT_MB must be 0 (unlimited) or an integer of at least 6 MiB. Exiting..${NOCOLOUR}"
+    exit 1
+  fi
+  if [[ -z "$EARNAPP_CPU_LIMIT" ]]; then EARNAPP_CPU_LIMIT=1; fi
+  if [[ -z "$TUN2PROXY_CPU_LIMIT" ]]; then TUN2PROXY_CPU_LIMIT=1; fi
+  if [[ ! "$EARNAPP_CPU_LIMIT" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v limit="$EARNAPP_CPU_LIMIT" 'BEGIN { exit !(limit >= 0) }'; then
+    echo -e "${RED}EARNAPP_CPU_LIMIT must be a non-negative CPU count (0 means unlimited). Exiting..${NOCOLOUR}"
+    exit 1
+  fi
+  if [[ ! "$TUN2PROXY_CPU_LIMIT" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v limit="$TUN2PROXY_CPU_LIMIT" 'BEGIN { exit !(limit >= 0) }'; then
+    echo -e "${RED}TUN2PROXY_CPU_LIMIT must be a non-negative CPU count (0 means unlimited). Exiting..${NOCOLOUR}"
+    exit 1
+  fi
+  if [[ -z "$TUN2PROXY_MAX_SESSIONS" ]]; then TUN2PROXY_MAX_SESSIONS=100; fi
+  if [[ ! "$TUN2PROXY_MAX_SESSIONS" =~ ^[1-9][0-9]*$ ]]; then
+    echo -e "${RED}TUN2PROXY_MAX_SESSIONS must be a positive integer. Exiting..${NOCOLOUR}"
+    exit 1
   fi
 
   if [[ ! $EARNAPP_IMAGE ]]; then

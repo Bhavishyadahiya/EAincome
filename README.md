@@ -156,6 +156,11 @@ near the node.
 | `EARNAPP_IMAGE` | `madereddy/earnapp:latest` | Used only when `BUILD_EARNAPP_IMAGE=false`. Supports amd64 and arm64. Upstream uses `fazalfarhan01/earnapp:lite` |
 | `USE_PROXIES` | `false` | Requires `proxies.txt` |
 | `TUN2PROXY_IMAGE` | `ghcr.io/tun2proxy/tun2proxy:v0.8.3` | Pinned deliberately |
+| `EARNAPP_MEMORY_LIMIT_MB` | `100` | Hard memory limit per EarnApp container in MiB; `0` disables it. Exceeding the cap can OOM-kill the container |
+| `EARNAPP_CPU_LIMIT` | `1` | CPU ceiling in cores per EarnApp container; `0` disables it |
+| `TUN2PROXY_MEMORY_LIMIT_MB` | `25` | Hard memory limit per tunnel container in MiB; `0` disables it. Exceeding the cap can OOM-kill the tunnel |
+| `TUN2PROXY_CPU_LIMIT` | `1` | CPU ceiling in cores per tunnel container; `0` disables it |
+| `TUN2PROXY_MAX_SESSIONS` | `100` | Maximum concurrent TCP and UDP sessions per tunnel; when full, new sessions are dropped |
 | `TUN2PROXY_DNS_MODE` | blank | `virtual`, `over-tcp` or `direct` |
 | `USE_DNS_OVER_HTTPS` | `false` | Selects `over-tcp` when the mode above is blank |
 | `USE_SOCKS5_DNS` | `false` | **Deprecated.** Use `TUN2PROXY_DNS_MODE='direct'` |
